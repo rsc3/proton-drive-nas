@@ -36,7 +36,43 @@ Produces `proton-drive-baseline`. Verify:
 ## 2. Create a dedicated session for the NAS
 
 Use a **separate** session from your desktop's, so it can be revoked
-independently. The NAS has no keyring, so it must be the plaintext store:
+independently. The NAS has no keyring, so it must be the plaintext store.
+
+> **This is a plaintext credential.** Anyone who reads `auth-session.json` has
+> your whole Drive. Keep it out of any exported path, and never inside the
+> synced folder. This is inherent to unattended operation, not a bug: nobody is
+> present to supply a secret at 3am, so the machine has to hold one it can read.
+
+### Preferred: log in on the NAS itself
+
+`auth login` is a browser handoff — it prints a URL, polls every 5 s, and
+completes when you finish signing in on *any* device. So it works headlessly, and
+the credential is then born on the NAS and never exists anywhere else. No copies
+in transit, on your desktop, or in a staging share.
+
+It needs a TTY. Either enable SSH temporarily and run:
+
+```sh
+docker run --rm -it \
+  -e PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file \
+  -e PROTON_DRIVE_CACHE_DIR=/state -e HOME=/state \
+  -v /volume1/docker/protondrive/bin/proton-drive:/opt/proton-drive:ro \
+  -v /volume1/docker/protondrive/state:/state \
+  python:3-slim /opt/proton-drive auth login
+```
+
+...or, without SSH: in Container Manager create a container from `python:3-slim`
+with those two volumes and the command `sleep infinity`, start it, open its
+**Terminal**, run `/opt/proton-drive auth login` there, then delete the container.
+The `state` volume persists.
+
+Note the URL is printed on **stdout**, not written to the CLI's log file — don't
+pipe the output somewhere you can't read it.
+
+### Alternative: mint on your desktop and copy
+
+Simpler, at the cost of the credential existing in two places (and in whatever
+you copy it with):
 
 ```sh
 mkdir -p ~/proton-nas-creds && chmod 700 ~/proton-nas-creds
@@ -46,16 +82,25 @@ proton-drive auth login
 chmod 600 ~/proton-nas-creds/*
 ```
 
-Only `auth-session.json` and `clientUid.json` need to go to the NAS.
+Only `auth-session.json` and `clientUid.json` need to go to the NAS. If you use
+the staging mechanism, the task shreds the staged copies after installing them.
 
-> **This file is a plaintext credential.** Anyone who reads it has your Drive.
-> Keep it out of any exported path, and never inside the synced folder.
+### Why not something encrypted at rest
+
+| Option | Why it doesn't work headlessly |
+| --- | --- |
+| `PROTON_DRIVE_CREDENTIALS_STORE=pass` | GPG-encrypted, but needs either a passphrase-less key (equivalent to plaintext) or a passphrase typed after every boot |
+| Encrypted shared folder for `state/` | Real encryption at rest, but requires manual unlock after every reboot, and the sync silently stops until you do |
+| Docker/DSM secrets | DSM has no secrets service for containers |
+
+The workable posture is: a dedicated, independently revocable session; created on
+the NAS; `0600` in a folder that is never exported; rotated when you like.
 
 ## 3. Lay out files on the NAS
 
 Target layout:
 
-```
+```text
 /volume1/docker/protondrive/
 ├── bin/proton-drive        <- the baseline binary from step 1
 ├── sync/pd_sync.py         <- nas/pd_sync.py
@@ -101,7 +146,7 @@ flight, since DSM won't tell you.
 Expect the first run to fail and the second to succeed if the session cache was
 just created — the script retries once automatically. Look for:
 
-```
+```text
 binary: baseline build, verified
 smoke test PASSED
 === done in ...: downloaded=N ... errors=0
@@ -127,7 +172,7 @@ Control Panel → File Services → **NFS** → enable, max protocol NFSv4.1.
 Shared Folder → `proton` → Edit → **NFS Permissions** → Create:
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | Hostname or IP | `LAN_CIDR` e.g. `192.168.1.0/24` |
 | Privilege | **Read only** |
 | Squash | `Map all users to admin` |
@@ -143,7 +188,7 @@ read-only turns silent data loss into an error.
 
 Add to `/etc/fstab` (one line):
 
-```
+```text
 NAS_IP:/volume1/proton  /media/proton  nfs4  noauto,x-systemd.automount,x-systemd.mount-timeout=10,x-systemd.idle-timeout=600,_netdev,soft,timeo=30,retrans=2,retry=0,x-gvfs-show,ro  0 0
 ```
 
@@ -189,7 +234,7 @@ previews for every video over the network. In Dolphin: open the folder, then
 Drop files into the staging directory and the next run installs them:
 
 | Staged file | Installed as |
-|---|---|
+| --- | --- |
 | `proton-drive.new` | `$BASE/bin/proton-drive` |
 | `pd_sync.py.new` | `$BASE/sync/pd_sync.py` |
 | `auth-session.json.new` | `$BASE/state/auth-session.json` (+ clears stale cache) |

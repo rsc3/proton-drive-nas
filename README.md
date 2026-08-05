@@ -6,7 +6,7 @@ official CLI — no rclone, no reverse-engineered API, no browser automation.
 The NAS copy is then re-exported over NFS so it shows up as an ordinary folder on
 your Linux desktop, with graceful failure when the NAS is unreachable.
 
-```
+```text
 Proton Drive ──(official CLI, in a container on the NAS)──> /volume1/proton
                                                                   │
                                                             NFS (read-only)
@@ -24,7 +24,7 @@ Proton Drive has no Linux sync client (a GUI one is in development, no committed
 date). The obvious options both fail on a NAS:
 
 | Approach | Problem |
-|---|---|
+| --- | --- |
 | `rclone mount` on the desktop | Online-only filesystem on a laptop that suspends; blocks on `stat` when the network is away |
 | `rclone sync` on the NAS | Proton **rejects rclone**: `422 Code=2028, "This version of the app is no longer supported"` |
 | Proton's official CLI on the NAS | Prebuilt binary **requires AVX2**; most Synology Intel CPUs don't have it → `SIGILL` |
@@ -40,7 +40,7 @@ evidence — worth reading before you try to "simplify" any of this.
 ## What's here
 
 | Path | What it is |
-|---|---|
+| --- | --- |
 | [`bin/pd`](bin/pd) | Wrapper around the official CLI for day-to-day file management |
 | [`nas/pd_sync.py`](nas/pd_sync.py) | The mirror engine. Walks Proton, diffs by sha1, downloads changes, trashes removals |
 | [`nas/nas-task.sh`](nas/nas-task.sh) | What DSM Task Scheduler actually runs |

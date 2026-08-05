@@ -6,7 +6,7 @@ Everything below was established empirically. Recorded so nobody repeats it.
 
 rclone sends `X-Pm-Appversion: external-drive-rclone@<version>-stable` and gets:
 
-```
+```text
 422 POST https://drive-api.proton.me/auth/v4
 Code=2028: This version of the app is no longer supported, please update
 ```
@@ -20,7 +20,7 @@ does a semver comparison — `1.75.0-stable` sorts *below* `1.75.0`),
 **Do not brute-force app version strings.** The impersonation attempt tripped
 Proton's abuse protection:
 
-```
+```text
 Code=2028: Our systems detected unusual activity targeting your account.
 To protect you from potential compromise, we have temporarily limited access
 ```
@@ -41,7 +41,7 @@ impersonation isn't just ineffective, it's a bad idea. There are also reports of
 
 Symptom, and it is *nasty* to diagnose:
 
-```
+```text
 exit=132              # 128 + 4 = SIGILL, illegal instruction
 ```
 
@@ -51,7 +51,7 @@ wrapper discards exit codes.
 The CLI is TypeScript compiled with Bun, and Bun's default x64 target requires
 AVX2. A Celeron J4125 (Gemini Lake) stops at `sse4_2`:
 
-```
+```text
 $ grep -o -E 'avx2|avx|fma|sse4_2' /proc/cpuinfo | sort -u
 sse4_2
 ```
@@ -95,7 +95,7 @@ impersonation is needed.
 By default credentials go through `Bun.secrets` → `libsecret` → your desktop
 keyring. In a container you get:
 
-```
+```text
 Failed to load session from secrets: libsecret not available
 ```
 
@@ -109,11 +109,38 @@ container needs a single volume.
 Only **two files** need transferring to seed a session: `auth-session.json` and
 `clientUid.json`. Everything else regenerates.
 
+### `auth login` works headlessly
+
+Better than transferring anything: log in *on the NAS*. `auth login` is a browser
+handoff, not a local-browser requirement. It prints a URL, then polls:
+
+```text
+INFO  [cli] Authenticating via web
+DEBUG [cli] Checking authentication status
+DEBUG [cli] Authentication not yet ready (2001: Invalid selector)
+```
+
+...every 5 s until you complete the sign-in on any device. So a container with a
+TTY and the state volume mounted is enough, and the credential is then created on
+the NAS and never exists anywhere else.
+
+The URL goes to **stdout**, not into the CLI's log file — pipe the output through
+something that buffers and you'll see nothing at all while it waits.
+
+### There is no encrypted-at-rest option that stays unattended
+
+Unattended means no human supplies a secret at run time, so the machine must hold
+one it can read by itself. `pass` needs a passphrase-less GPG key (equivalent to
+plaintext) or a passphrase after every boot; an encrypted Synology share needs
+manual unlock after every reboot and the sync silently stops until you do it.
+Use a dedicated, independently revocable session and keep the file `0600` in a
+folder that is never exported.
+
 ## Revoking a session leaves four caches behind
 
 After revoking a session in Proton, the CLI fails with:
 
-```
+```text
 Invalid access token
 ```
 
@@ -177,7 +204,7 @@ Not fully understood. `nas-task.sh` absorbs it by retrying once after 30 s on
 
 Cloned from a long-working share, with the privilege flipped:
 
-```
+```text
 Squash   : Map all users to admin
 Security : sys
 Privilege: Read only
@@ -194,7 +221,7 @@ read-only turns silent data loss into a loud error.
 
 Client side, matching options that fail fast instead of hanging:
 
-```
+```text
 noauto,x-systemd.automount,x-systemd.mount-timeout=10,x-systemd.idle-timeout=600,
 _netdev,soft,timeo=30,retrans=2,retry=0,x-gvfs-show,ro
 ```
