@@ -33,6 +33,21 @@ SECTIONS="/my-files:my-files /shared-with-me:shared-with-me:no-delete"
 [ $# -gt 0 ] && SECTIONS="$*"
 # ------------------------------------------------------------ end config ------
 
+# --- relocate before doing anything ------------------------------------------
+# sh reads scripts incrementally, so replacing this file while a run is in
+# progress makes the running shell resume at a byte offset in different content
+# and die with "syntax error: unexpected end of file". Since this file lives on a
+# network share precisely so it can be updated at any time, copy it somewhere
+# private and re-exec from there. The window before this runs is a few lines.
+if [ -z "${PD_RELOCATED:-}" ] && [ -f "$0" ]; then
+    PRIV=$BASE/nas-task.run.sh
+    mkdir -p "$BASE"
+    if cp "$0" "$PRIV" 2>/dev/null; then
+        PD_RELOCATED=1 export PD_RELOCATED
+        exec /bin/sh "$PRIV" "$@"
+    fi
+fi
+
 LOG=$BASE/log/sync.log
 
 # No desktop keyring exists on a NAS, so credentials come from the plaintext
