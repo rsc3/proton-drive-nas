@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""pd - thin wrapper around the Proton Drive CLI.
+
+Proton is the source of truth: make changes here and the NAS mirror follows on
+its next run. Paths without a leading "/" are assumed to be under /my-files.
+"""
+import os
+import subprocess
+import sys
+
+CLI = os.path.expanduser("~/.local/bin/proton-drive")
+ROOT = "/my-files"
+
+USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
+
+  pd ls [path]                 list a folder              (default /my-files)
+  pd info <path>               full metadata incl. sha1 and size
+  pd find <text>               match names in a folder     (pd find x [path])
+
+  pd add <local>... [remote]   upload; remote defaults to /my-files
+  pd mkdir <parent> <name>     create a folder
+  pd get <path>... [localdir]  download; localdir defaults to .
+
+  pd mv <src>... <destdir>     move   (server-side, instant, no re-upload)
+  pd cp <src>... <destdir>     copy   (server-side)
+  pd rn <path> <newname>       rename
+
+  pd rm <path>...              move to Proton trash (recoverable)
+  pd restore <path>...         restore from Proton trash
+  pd purge <path>...           delete permanently (asks first)
+
+  pd share <path>              sharing status
+  pd raw <args>...             pass straight through to proton-drive
+
+A leading / is optional. Escape a literal / inside a name as \\/ .
+"""
+
+
+def abs_remote(p):
+    # "/" means the sections root (/my-files, /shared-with-me, ...), which is
+    # not a real folder -- you cannot create or upload into it. Treat a bare "/"
+    # as the user's own root instead, which is what people mean.
+    if p in ("", "/", "."):
+        return ROOT
+    return p if p.startswith("/") else f"{ROOT}/{p}"
+
+
+def run(*args, capture=False):
+    r = subprocess.run([CLI, *args],
+                       capture_output=capture, text=True)
+    if capture:
+        if r.returncode != 0:
+            sys.stderr.write(r.stderr or "")
+            sys.exit(r.returncode)
+        return r.stdout
+    sys.exit(r.returncode) if r.returncode else None
+
+
+def main(argv):
+    if not argv or argv[0] in ("help", "-h", "--help"):
+        print(USAGE)
+        return 0
+    cmd, rest = argv[0], argv[1:]
+
+    def need(n, what):
+        if len(rest) < n:
+            sys.exit(f"pd {cmd}: need {what}")
+
+    if cmd == "ls":
+        run("filesystem", "list", abs_remote(rest[0]) if rest else ROOT)
+
+    elif cmd == "info":
+        need(1, "a path")
+        run("filesystem", "info", abs_remote(rest[0]))
+
+    elif cmd == "find":
+        need(1, "a search string")
+        import json
+        q = rest[0].lower()
+        where = abs_remote(rest[1]) if len(rest) > 1 else ROOT
+        data = json.loads(run("filesystem", "list", where, "--json",
+                              capture=True) or "[]")
+        hits = 0
+        for e in data:
+            name = (e.get("name") or {}).get("value") or ""
+            if q in name.lower():
+                size = (e.get("activeRevision") or {}).get("claimedSize")
+                sz = f"{size/1e6:.1f} MB" if size else ""
+                print(f"{e.get('type','?'):7} {name}  {sz}")
+                hits += 1
+        print(f"-- {hits} match(es) in {where}", file=sys.stderr)
+
+    elif cmd == "add":
+        need(1, "local files")
+        # If the last argument exists locally it is a source, not a destination.
+        if os.path.exists(rest[-1]) or len(rest) == 1:
+            srcs, dest = rest, ROOT
+        else:
+            srcs, dest = rest[:-1], abs_remote(rest[-1])
+        missing = [s for s in srcs if not os.path.exists(s)]
+        if missing:
+            sys.exit("pd add: no such local path: " + ", ".join(missing))
+        print(f"uploading {len(srcs)} item(s) -> {dest}")
+        run("filesystem", "upload", "-c", "skip", *srcs, dest)
+
+    elif cmd == "mkdir":
+        need(1, "a folder name")
+        # One arg: create in /my-files. Two args: <parent> <name>.
+        if len(rest) == 1:
+            parent, name = ROOT, rest[0]
+        else:
+            parent, name = abs_remote(rest[0]), rest[1]
+        run("filesystem", "create-folder", parent, name)
+
+    elif cmd == "get":
+        need(1, "a remote path")
+        # Trailing local dir only counts if it is not itself a remote-looking arg.
+        if len(rest) > 1 and os.path.isdir(rest[-1]):
+            paths, dest = rest[:-1], rest[-1]
+        else:
+            paths, dest = rest, "."
+        run("filesystem", "download", "-f", "skip",
+            *[abs_remote(p) for p in paths], dest)
+
+    elif cmd in ("mv", "cp"):
+        need(2, "one or more sources and a destination folder")
+        sub = "move" if cmd == "mv" else "copy"
+        srcs = [abs_remote(p) for p in rest[:-1]]
+        run("filesystem", sub, *srcs, abs_remote(rest[-1]))
+
+    elif cmd == "rn":
+        need(2, "a path and a new name")
+        run("filesystem", "rename", abs_remote(rest[0]), rest[1])
+
+    elif cmd == "rm":
+        need(1, "a path")
+        run("filesystem", "trash", *[abs_remote(p) for p in rest])
+        print("moved to Proton trash - 'pd restore <path>' undoes this")
+
+    elif cmd == "restore":
+        need(1, "a path")
+        run("filesystem", "restore", *[abs_remote(p) for p in rest])
+
+    elif cmd == "purge":
+        need(1, "a path")
+        print("PERMANENT delete, not recoverable:")
+        for p in rest:
+            print("  " + abs_remote(p))
+        if input("type DELETE to confirm: ") != "DELETE":
+            sys.exit("aborted")
+        run("filesystem", "delete", *[abs_remote(p) for p in rest])
+
+    elif cmd == "share":
+        need(1, "a path")
+        run("sharing", "status", abs_remote(rest[0]))
+
+    elif cmd == "raw":
+        run(*rest)
+
+    else:
+        sys.exit(f"pd: unknown command {cmd!r}\n\n{USAGE}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

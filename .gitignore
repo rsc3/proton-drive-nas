@@ -1,0 +1,11 @@
+# never commit credentials or session state
+auth-session.json
+clientUid.json
+proton-nas-creds/
+*.log
+# build artefacts
+proton-drive-baseline
+proton-drive
+pd-build/
+release/
+node_modules/
