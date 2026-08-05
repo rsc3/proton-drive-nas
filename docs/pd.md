@@ -24,12 +24,12 @@ proton-drive auth login
 ### Looking around
 
 ```sh
-pd ls                        # list /my-files
-pd ls videos            # list a folder
-pd ls /shared-with-me        # absolute paths work too
-pd info videos/clip.mp4 # full metadata: sha1, size, revision
-pd find clip                 # match names in /my-files
-pd find clip music    # ...or in a specific folder
+pd ls                     # list /my-files
+pd ls videos              # list a folder
+pd ls /shared-with-me     # absolute paths work too
+pd info videos/clip.mp4   # full metadata: sha1, size, revision
+pd find clip              # match names in /my-files
+pd find clip music        # ...or in a specific folder
 ```
 
 `pd find` matches within **one** folder — it does not recurse, because the CLI has
@@ -38,9 +38,9 @@ no recursive listing and walking a large tree is one API call per folder.
 ### Adding files
 
 ```sh
-pd add photo.jpg                     # upload into /my-files
-pd add *.mp4 videos             # upload into a folder
-pd add ~/somedir videos         # folders work; uploaded recursively
+pd add photo.jpg           # upload into /my-files
+pd add *.mp4 videos        # upload into a folder
+pd add ~/somedir videos    # folders work; uploaded recursively
 ```
 
 Uses `-c skip`, so files that already exist are left alone rather than duplicated.
@@ -50,12 +50,12 @@ path is missing.
 ### Rearranging
 
 ```sh
-pd mkdir 2026-trip                       # create in /my-files
-pd mkdir videos clips               # create inside a folder
-pd mv videos/a.mp4 2026-trip        # move
-pd mv a.mp4 b.mp4 c.mp4 2026-trip        # several at once
-pd cp videos/a.mp4 2026-trip        # copy
-pd rn 2026-trip 2026-japan               # rename
+pd mkdir 2026-trip                 # create in /my-files
+pd mkdir videos clips              # create inside a folder
+pd mv videos/a.mp4 2026-trip       # move
+pd mv a.mp4 b.mp4 c.mp4 2026-trip  # several at once
+pd cp videos/a.mp4 2026-trip       # copy
+pd rn 2026-trip 2026-japan         # rename
 ```
 
 `mv` and `cp` are **server-side and instant** — no download/re-upload, even for
@@ -76,14 +76,14 @@ safety nets.
 ### Downloading
 
 ```sh
-pd get videos/clip.mp4            # into current directory
-pd get videos/clip.mp4 ~/Videos   # into a directory
+pd get videos/clip.mp4          # into current directory
+pd get videos/clip.mp4 ~/Videos # into a directory
 ```
 
 ### Misc
 
 ```sh
-pd share videos       # sharing status
+pd share videos                        # sharing status
 pd raw filesystem list /trash --json   # anything not wrapped
 pd help
 ```
