@@ -176,8 +176,36 @@ Not fully understood. `nas-task.sh` absorbs it by retrying once after 30 s on
   `Root node not found`.
 - **Listings can be stale for a few seconds after a mutation.** A folder you just
   trashed may still appear.
-- Undecryptable filenames and names containing a literal `/` exist in the wild;
-  the engine skips and logs them rather than guessing.
+- Undecryptable filenames exist in the wild; the engine skips and logs them.
+
+### The CLI renames files when it writes them to disk
+
+This one silently breaks change detection, and it took a "why is exactly one file
+downloaded every single run?" to notice.
+
+Proton had `1:13:2018 MAIL.txt`. On disk the CLI wrote `1_13_2018 MAIL.txt`. The
+sync then looked for the original name, never found it, and re-downloaded it every
+run forever. On a **mirrored** section it's worse: the sanitised file isn't in the
+expected set, so it gets deleted as extraneous and re-downloaded — permanent churn,
+and with `--trash-dir` a new trash copy every single run.
+
+The exact rule, lifted from the CLI binary:
+
+```js
+fF0 = /[\x00-\x1f\x7f<>:"|?*\\/]/g
+FX(name) => name.replace(fF0, "_")   // then "" -> "_", "." -> "_", ".." -> "__"
+```
+
+So control characters and `< > : " | ? * \ /` all become `_`. `pd_sync.py`
+reimplements this as `local_name()` and keys its local index by the sanitised
+path while keeping true names for remote calls.
+
+Two different remote names can sanitise to the same local name (`a:b` and `a?b`
+both become `a_b`). The engine logs the collision and skips the second rather than
+letting them overwrite each other.
+
+Symptom to watch for: a run that reports a small non-zero `downloaded=` with
+`0.00 GB` transferred, every time, with everything else `unchanged`.
 
 ## Synology / DSM gotchas
 

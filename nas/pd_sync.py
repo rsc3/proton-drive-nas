@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,27 @@ LOCAL_KEEP = {"@eaDir", "#recycle", ".DS_Store", "@tmp", ".trash"}
 def esc(name):
     """Proton path syntax: literal / in a name is backslash-escaped."""
     return name.replace("\\", "\\\\").replace("/", "\\/")
+
+
+# The CLI rewrites unsafe characters when it writes a file to disk, so the local
+# name can differ from the remote one. Mirror its rule exactly, or every affected
+# file is re-downloaded on every run (and, on a mirrored section, deleted as
+# extraneous in between). Taken from the CLI binary:
+#     fF0 = /[\x00-\x1f\x7f<>:"|?*\\/]/g
+#     name.replace(fF0, "_"); "" -> "_"; "." -> "_"; ".." -> "__"
+_UNSAFE = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\/]')
+
+
+def local_name(name):
+    """The on-disk name the CLI will use for a given remote name."""
+    z = _UNSAFE.sub("_", name)
+    if z == "":
+        return "_"
+    if z == ".":
+        return "_"
+    if z == "..":
+        return "__"
+    return z
 
 
 class RateLimited(Exception):
@@ -62,21 +84,25 @@ def run_cli(args, attempts=5, timeout=1800):
 
 
 def walk(root, workers, log):
-    """Return (files, folders) as dicts keyed by path relative to root."""
+    """Return (files, folders) keyed by LOCAL path relative to the target.
+
+    Local keys are sanitised the same way the CLI sanitises names on download
+    (see local_name). Remote paths keep the true names. Getting this wrong means
+    the expected local file never exists, so it is re-downloaded every run -- and
+    on a mirrored section the sanitised file is then deleted as "extraneous",
+    producing infinite delete/download churn.
+    """
     files, folders = {}, {}
-    pending = queue.Queue()
-    pending.put(root)
+    pending = queue.Queue()          # (remote path, local rel prefix)
+    pending.put((root, ""))
     lock = threading.Lock()
     stop = threading.Event()
     err = {"rate_limited": None, "count": 0}
 
-    def rel(path):
-        return path[len(root):].lstrip("/")
-
     def worker():
         while not stop.is_set():
             try:
-                path = pending.get(timeout=2)
+                path, prefix = pending.get(timeout=2)
             except queue.Empty:
                 return
             try:
@@ -104,20 +130,25 @@ def walk(root, workers, log):
                         log(f"SKIP undecryptable name, uid={e.get('uid')}")
                     continue
                 name = nm["value"]
-                if "/" in name or name in ("", ".", ".."):
-                    with lock:
-                        err["count"] += 1
-                        log(f"SKIP unmappable name {name!r} in {path}")
-                    continue
                 child = f"{path}/{esc(name)}"
+                child_rel = f"{prefix}/{local_name(name)}".lstrip("/")
                 rev = e.get("activeRevision") or {}
                 if e.get("type") == "folder":
                     with lock:
-                        folders[rel(child)] = True
-                    pending.put(child)
+                        folders[child_rel] = True
+                    pending.put((child, child_rel))
                 else:
                     with lock:
-                        files[rel(child)] = {
+                        # Two different remote names can sanitise to the same
+                        # local name. Whoever lands first wins; flag the clash
+                        # rather than silently overwriting one with the other.
+                        if child_rel in files:
+                            err["count"] += 1
+                            log(f"SKIP name collision after sanitising: "
+                                f"{child!r} and {files[child_rel]['remote']!r} "
+                                f"both map to {child_rel!r}")
+                            continue
+                        files[child_rel] = {
                             "remote": child,
                             "size": rev.get("claimedSize",
                                             rev.get("storageSize")),
