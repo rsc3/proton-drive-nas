@@ -178,6 +178,22 @@ Not fully understood. `nas-task.sh` absorbs it by retrying once after 30 s on
   trashed may still appear.
 - Undecryptable filenames exist in the wild; the engine skips and logs them.
 
+### A failed download can still exit 0
+
+Downloading from `/shared-with-me` on one machine printed:
+
+```text
+You need to login first
+```
+
+...wrote nothing, and **exited with status 0**. The session was fine — listing
+worked, and `/my-files` downloads on the same machine worked. Whatever the real
+cause, the lesson is that the exit code cannot be trusted on its own.
+
+`pd_sync.py` therefore confirms every downloaded file exists at the expected size
+before counting it as downloaded. Without that, a silent failure is recorded as
+success and the delete pass then runs against a false picture of what synced.
+
 ### The CLI renames files when it writes them to disk
 
 This one silently breaks change detection, and it took a "why is exactly one file

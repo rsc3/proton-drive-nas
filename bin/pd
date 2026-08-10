@@ -5,6 +5,7 @@ Proton is the source of truth: make changes here and the NAS mirror follows on
 its next run. Paths without a leading "/" are assumed to be under /my-files.
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -28,6 +29,9 @@ USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
   pd rm <path>...              move to Proton trash (recoverable)
   pd restore <path>...         restore from Proton trash
   pd purge <path>...           delete permanently (asks first)
+
+  pd verify <local> [remote]   check an upload arrived intact (sha1 per file)
+  pd verify --deep <local> [remote]   also download each file and re-hash it
 
   pd share <path>              sharing status
   pd raw <args>...             pass straight through to proton-drive
@@ -149,6 +153,130 @@ def main(argv):
         if input("type DELETE to confirm: ") != "DELETE":
             sys.exit("aborted")
         run("filesystem", "delete", *[abs_remote(p) for p in rest])
+
+    elif cmd == "verify":
+        import hashlib
+        import json
+        import tempfile
+
+        deep = "--deep" in rest
+        rest = [a for a in rest if a != "--deep"]
+        need(1, "a local path")
+        local = os.path.abspath(rest[0].rstrip("/"))
+        if not os.path.exists(local):
+            sys.exit(f"pd verify: no such local path: {local}")
+        remote = (abs_remote(rest[1]) if len(rest) > 1
+                  else f"{ROOT}/{os.path.basename(local)}")
+
+        def sha1_file(p):
+            h = hashlib.sha1()
+            with open(p, "rb") as f:
+                while chunk := f.read(1 << 20):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        # Collect the remote tree: one list call per folder (no recursion flag).
+        remote_files = {}
+
+        def crawl(rpath, prefix=""):
+            data = json.loads(run("filesystem", "list", rpath, "--json",
+                                  capture=True) or "[]")
+            for e in data:
+                nm = e.get("name") or {}
+                if not nm.get("ok"):
+                    print(f"  ?? undecryptable name under {prefix or '/'}")
+                    continue
+                name = nm["value"]
+                # Keep the true name AND the on-disk name the CLI would write,
+                # so this works whether you are checking an upload (names match)
+                # or a mirrored/downloaded copy (names were sanitised).
+                rel = f"{prefix}/{name}".lstrip("/")
+                esc = name.replace("\\", "\\\\").replace("/", "\\/")
+                if e.get("type") == "folder":
+                    crawl(f"{rpath}/{esc}", rel)
+                else:
+                    rev = e.get("activeRevision") or {}
+                    remote_files[rel] = {
+                        "size": rev.get("claimedSize"),
+                        "sha1": ((rev.get("claimedDigests") or {})
+                                 .get("sha1") or "").lower(),
+                        "path": f"{rpath}/{esc}",
+                    }
+
+        if os.path.isdir(local):
+            local_files = {}
+            for dp, _dn, fn in os.walk(local):
+                for f in fn:
+                    full = os.path.join(dp, f)
+                    local_files[os.path.relpath(full, local)] = full
+            crawl(remote)
+        else:
+            local_files = {os.path.basename(local): local}
+            parent = remote.rsplit("/", 1)[0] or ROOT
+            crawl(parent)
+            remote_files = {k: v for k, v in remote_files.items()
+                            if k == os.path.basename(local)}
+
+        # The CLI rewrites [\x00-\x1f\x7f<>:"|?*\\/] to _ when writing to disk,
+        # so a mirrored copy of "a:b.txt" is on disk as "a_b.txt". Index remote
+        # entries under both names; exact match wins.
+        unsafe = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\/]')
+        for rel in list(remote_files):
+            alt = "/".join(unsafe.sub("_", part) for part in rel.split("/"))
+            if alt != rel and alt not in remote_files:
+                remote_files[alt] = remote_files[rel]
+
+        ok = missing = mismatch = 0
+        for rel in sorted(local_files):
+            lp = local_files[rel]
+            r = remote_files.get(rel)
+            if r is None:
+                print(f"  MISSING   {rel}")
+                missing += 1
+                continue
+            lsize = os.path.getsize(lp)
+            if r["size"] is not None and r["size"] != lsize:
+                print(f"  SIZE      {rel}  local={lsize} remote={r['size']}")
+                mismatch += 1
+                continue
+            lsha = sha1_file(lp)
+            if r["sha1"] and r["sha1"] != lsha:
+                print(f"  SHA1      {rel}")
+                mismatch += 1
+                continue
+            if not r["sha1"]:
+                print(f"  NO-DIGEST {rel} (size matches; cannot verify content)")
+                mismatch += 1
+                continue
+            if deep:
+                # The stored sha1 is claimed by whichever client uploaded the
+                # file; Proton does not recompute it. Downloading and re-hashing
+                # is the only check that proves a real round trip.
+                with tempfile.TemporaryDirectory() as td:
+                    run("filesystem", "download", "-f", "replace",
+                        r["path"], td, capture=True)
+                    got = os.path.join(td, os.path.basename(rel))
+                    if not os.path.exists(got) or sha1_file(got) != lsha:
+                        print(f"  ROUNDTRIP {rel}")
+                        mismatch += 1
+                        continue
+            ok += 1
+
+        # Aliases were injected above, so report EXTRA on true names only.
+        extra = sorted(k for k in set(remote_files) - set(local_files)
+                       if not any(remote_files.get(o) is remote_files[k]
+                                  and o in local_files
+                                  for o in remote_files))
+        for rel in extra:
+            print(f"  EXTRA     {rel} (in Proton, not local)")
+
+        mode = "deep" if deep else "sha1"
+        print(f"\n{ok}/{len(local_files)} verified ({mode}), "
+              f"{missing} missing, {mismatch} mismatched, {len(extra)} extra")
+        if not deep and ok == len(local_files) and not missing and not mismatch:
+            print("note: sha1 is the digest the uploading client claimed; "
+                  "Proton does not recompute it. Use --deep to prove a round trip.")
+        return 1 if (missing or mismatch) else 0
 
     elif cmd == "share":
         need(1, "a path")

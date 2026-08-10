@@ -300,10 +300,29 @@ def main():
             for rel, err in failures:
                 stats["errors"] += 1
                 log(f"ERROR downloading {rel}: {err}")
+            # Do NOT trust the exit code. The CLI has been observed printing
+            # "You need to login first" and still exiting 0 with nothing
+            # written, so confirm each file actually landed at the expected
+            # size. Otherwise a silent failure is recorded as a success and the
+            # delete pass proceeds on a false picture.
             for rel, meta in chunk:
-                if rel not in failed:
-                    stats["downloaded"] += 1
-                    stats["bytes"] += meta["size"] or 0
+                if rel in failed:
+                    continue
+                lp = os.path.join(args.target, rel)
+                try:
+                    got = os.path.getsize(lp)
+                except OSError:
+                    stats["errors"] += 1
+                    log(f"ERROR {rel}: download reported success but the file "
+                        f"is not there")
+                    continue
+                if meta["size"] is not None and got != meta["size"]:
+                    stats["errors"] += 1
+                    log(f"ERROR {rel}: download reported success but size is "
+                        f"{got}, expected {meta['size']}")
+                    continue
+                stats["downloaded"] += 1
+                stats["bytes"] += meta["size"] or 0
 
     # Mirror deletions. Skipped entirely if the walk had errors -- a partial
     # listing would look like mass deletion and wipe good data.
