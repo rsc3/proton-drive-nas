@@ -32,6 +32,7 @@ USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
 
   pd verify <local> [remote]   check an upload arrived intact (sha1 per file)
   pd verify --deep <local> [remote]   also download each file and re-hash it
+  pd verify --fix <local> [remote]    re-upload anything missing or corrupt
 
   pd share <path>              sharing status
   pd raw <args>...             pass straight through to proton-drive
@@ -160,7 +161,8 @@ def main(argv):
         import tempfile
 
         deep = "--deep" in rest
-        rest = [a for a in rest if a != "--deep"]
+        fix = "--fix" in rest
+        rest = [a for a in rest if a not in ("--deep", "--fix")]
         need(1, "a local path")
         local = os.path.abspath(rest[0].rstrip("/"))
         if not os.path.exists(local):
@@ -227,21 +229,25 @@ def main(argv):
                 remote_files[alt] = remote_files[rel]
 
         ok = missing = mismatch = 0
+        problems = []          # (rel, local path, needs_replace)
         for rel in sorted(local_files):
             lp = local_files[rel]
             r = remote_files.get(rel)
             if r is None:
                 print(f"  MISSING   {rel}")
+                problems.append((rel, lp, False))
                 missing += 1
                 continue
             lsize = os.path.getsize(lp)
             if r["size"] is not None and r["size"] != lsize:
                 print(f"  SIZE      {rel}  local={lsize} remote={r['size']}")
+                problems.append((rel, lp, True))
                 mismatch += 1
                 continue
             lsha = sha1_file(lp)
             if r["sha1"] and r["sha1"] != lsha:
                 print(f"  SHA1      {rel}")
+                problems.append((rel, lp, True))
                 mismatch += 1
                 continue
             if not r["sha1"]:
@@ -258,6 +264,7 @@ def main(argv):
                     got = os.path.join(td, os.path.basename(rel))
                     if not os.path.exists(got) or sha1_file(got) != lsha:
                         print(f"  ROUNDTRIP {rel}")
+                        problems.append((rel, lp, True))
                         mismatch += 1
                         continue
             ok += 1
@@ -269,6 +276,31 @@ def main(argv):
                                   for o in remote_files))
         for rel in extra:
             print(f"  EXTRA     {rel} (in Proton, not local)")
+
+        if fix and problems:
+            print(f"\nfixing {len(problems)} file(s)...")
+            made = set()
+            for rel, lp, needs_replace in problems:
+                sub = os.path.dirname(rel)
+                parent = remote
+                # Recreate any missing intermediate folders, one level at a time.
+                for part in [p for p in sub.split(os.sep) if p]:
+                    if (parent, part) not in made:
+                        subprocess.run([CLI, "filesystem", "create-folder",
+                                        parent, part],
+                                       capture_output=True, text=True)
+                        made.add((parent, part))
+                    parent = f"{parent}/" + part.replace("\\", "\\\\").replace("/", "\\/")
+                # replace, not skip: skip only checks existence, so a corrupt or
+                # short file would be left exactly as it is.
+                strat = "replace" if needs_replace else "skip"
+                r2 = subprocess.run([CLI, "filesystem", "upload", "-f", strat,
+                                     lp, parent], capture_output=True, text=True)
+                state = "ok" if r2.returncode == 0 else f"FAILED rc={r2.returncode}"
+                print(f"  {strat:7} {rel}  {state}")
+            print("\nre-checking...")
+            args2 = [a for a in sys.argv[1:] if a != "--fix"]
+            return subprocess.run([sys.executable, sys.argv[0], *args2]).returncode
 
         mode = "deep" if deep else "sha1"
         print(f"\n{ok}/{len(local_files)} verified ({mode}), "

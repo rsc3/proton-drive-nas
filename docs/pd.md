@@ -73,6 +73,45 @@ pd purge old.mp4           # permanent; prompts, type DELETE to confirm
 NAS mirror's own `.trash/<date>/` on the next sync, so there are two independent
 safety nets.
 
+### Checking an upload actually worked
+
+```sh
+pd add ~/stuff/project      # upload
+pd verify ~/stuff/project   # compare every file: size + sha1
+```
+
+Reports `MISSING`, `SIZE`, `SHA1` or `EXTRA` per file and ends with `N/N
+verified`. Exits non-zero on any problem, so it chains:
+
+```sh
+pd add ~/stuff/project && pd verify ~/stuff/project && rm -rf ~/stuff/project
+```
+
+To repair whatever it found:
+
+```sh
+pd verify --fix ~/stuff/project
+```
+
+Missing files are uploaded; corrupt ones are re-uploaded with `replace`, then it
+re-checks automatically.
+
+**Why you cannot just re-run `pd add` to fix things.** `add` uses `-c skip`,
+which skips on *existence*, not content. A file that uploaded short or corrupt is
+skipped on the retry and stays broken forever. Repeating `add` fills in files
+that never arrived; only `--fix` (or `replace`) repairs damaged ones.
+
+For proof rather than a metadata check:
+
+```sh
+pd verify --deep ~/stuff/project
+```
+
+`--deep` downloads every file and re-hashes it. This matters because **Proton
+does not recompute the sha1** — it stores whatever the uploading client claimed.
+The fast check proves Proton's record matches your file; `--deep` proves the
+bytes come back.
+
 ### Downloading
 
 ```sh
