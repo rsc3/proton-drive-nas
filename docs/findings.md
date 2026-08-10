@@ -213,6 +213,36 @@ ValidationError: The mime type of the file is invalid ("application/x-dosexec").
 Allowed mime types are "application/octet-stream".
 ```
 
+### Existing thumbnails cannot be removed without re-uploading
+
+Thumbnails are **detectable** even though the CLI exposes nothing about them:
+they are counted in the revision's `storageSize`, so comparing it against
+`claimedSize` (the plaintext size) gives them away. Same 7,831-byte PNG uploaded
+twice:
+
+| upload | storageSize | overhead |
+| --- | --- | --- |
+| default | 10026 | ~2195 bytes |
+| with `-t` | 7912 | ~81 bytes (encryption only) |
+
+Anything over a few hundred bytes of overhead has a thumbnail.
+
+Removing one is another matter. `-f replace` does **not** work, because the CLI
+skips content-identical files outright:
+
+```text
+Transfer summary:
+  Uploaded: 0 items (0 B)
+```
+
+The only thing that strips a thumbnail is deleting the remote file and uploading
+it again (verified: overhead 2195 → 81).
+
+That makes retro-active pruning a bad trade. On one real Drive, 266 files carried
+~4.4 MiB of thumbnail data, and reclaiming it would mean deleting and re-uploading
+3.44 GB — while breaking share links and revision history for each file. Turn
+thumbnails off going forward and leave the existing ones alone.
+
 ### "You need to login first" is often a lie
 
 A single `filesystem list` can fail with:

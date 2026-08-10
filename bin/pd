@@ -39,6 +39,8 @@ USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
   pd verify --deep <local> [remote]   also download each file and re-hash it
   pd verify --fix <local> [remote]    re-upload anything missing or corrupt
 
+  pd prune-thumbs [path]       strip existing thumbnails (--dry-run, --yes)
+
   pd share <path>              sharing status
   pd raw <args>...             pass straight through to proton-drive
 
@@ -379,6 +381,133 @@ def main(argv):
         rem = (abs_remote(rest[1]) if len(rest) > 1
                else f"{ROOT}/{os.path.basename(loc)}")
         return verify_path(loc, rem, deep=deep, fix=fix)
+
+    elif cmd == "prune-thumbs":
+        import hashlib
+        import json
+        import tempfile
+
+        dry = "--dry-run" in rest
+        yes = "--yes" in rest
+        rest = [a for a in rest if a not in ("--dry-run", "--yes")]
+        remote = abs_remote(rest[0]) if rest else ROOT
+        # A verified local copy avoids downloading everything again. The NAS
+        # mirror is ideal: same bytes, already sha1-checked by the sync.
+        local_root = None
+        for i, a in enumerate(rest):
+            if a == "--local-root" and i + 1 < len(rest):
+                local_root = rest[i + 1]
+        if local_root is None and remote.startswith(ROOT):
+            guess = "/media/proton/my-files" + remote[len(ROOT):]
+            if os.path.isdir(guess):
+                local_root = guess
+
+        unsafe = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\/]')
+
+        def on_disk(name):
+            z = unsafe.sub("_", name)
+            return {"": "_", ".": "_", "..": "__"}.get(z, z)
+
+        def sha1_file(p):
+            h = hashlib.sha1()
+            with open(p, "rb") as f:
+                while chunk := f.read(1 << 20):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        # Thumbnails are counted in the revision's storageSize, so the gap
+        # between that and claimedSize (the plaintext size) reveals them.
+        # Encryption alone costs well under 500 bytes.
+        THRESHOLD = 500
+        found = []
+
+        def crawl(rpath, prefix=""):
+            data = json.loads(run("filesystem", "list", rpath, "--json",
+                                  capture=True) or "[]")
+            for e in data:
+                nm = e.get("name") or {}
+                if not nm.get("ok"):
+                    continue
+                name = nm["value"]
+                esc = name.replace("\\", "\\\\").replace("/", "\\/")
+                rel = f"{prefix}/{on_disk(name)}".lstrip("/")
+                if e.get("type") == "folder":
+                    crawl(f"{rpath}/{esc}", rel)
+                    continue
+                r = e.get("activeRevision") or {}
+                s, c = r.get("storageSize"), r.get("claimedSize")
+                if s is None or c is None or (s - c) <= THRESHOLD:
+                    continue
+                found.append({
+                    "rel": rel, "name": name, "parent": rpath,
+                    "path": f"{rpath}/{esc}", "over": s - c,
+                    "size": c,
+                    "sha1": ((r.get("claimedDigests") or {})
+                             .get("sha1") or "").lower(),
+                })
+
+        print(f"scanning {remote} ...")
+        crawl(remote)
+        if not found:
+            print("no thumbnails found")
+            return 0
+        tot = sum(f["over"] for f in found)
+        bytes_up = sum(f["size"] for f in found)
+        print(f"\n{len(found)} file(s) carry ~{tot/1024:.0f} KiB of thumbnail data")
+        print(f"stripping them means re-uploading {bytes_up/1e9:.2f} GB")
+        print(f"local source: {local_root or '(none - will download each file)'}")
+        if dry:
+            for f in found[:20]:
+                print(f"  {f['rel']}  (+{f['over']} B)")
+            if len(found) > 20:
+                print(f"  ... and {len(found)-20} more")
+            return 0
+        print("\nEach file is TRASHED and re-uploaded without a thumbnail.")
+        print("Share links and revision history for these files are lost.")
+        if not yes and input("type PRUNE to proceed: ") != "PRUNE":
+            sys.exit("aborted")
+
+        done = skipped = failed = 0
+        for n, f in enumerate(found, 1):
+            src = os.path.join(local_root, f["rel"]) if local_root else None
+            tmp = None
+            if not (src and os.path.exists(src)):
+                # No local copy: fetch it, so we never delete something we
+                # cannot put back.
+                tmp = tempfile.mkdtemp()
+                run("filesystem", "download", "-f", "replace", f["path"], tmp,
+                    capture=True)
+                cand = os.path.join(tmp, on_disk(f["name"]))
+                src = cand if os.path.exists(cand) else None
+            # Refuse to touch anything we cannot reproduce byte-for-byte.
+            if not src or (f["sha1"] and sha1_file(src) != f["sha1"]):
+                print(f"  [{n}/{len(found)}] SKIP {f['rel']} "
+                      f"(no verified local copy)")
+                skipped += 1
+                if tmp:
+                    subprocess.run(["rm", "-rf", tmp])
+                continue
+            subprocess.run([CLI, "filesystem", "trash", f["path"]],
+                           capture_output=True, text=True)
+            up = subprocess.run([CLI, "filesystem", "upload", "-t",
+                                 "-d", "merge", "-f", "replace",
+                                 src, f["parent"]],
+                                capture_output=True, text=True)
+            if up.returncode == 0:
+                print(f"  [{n}/{len(found)}] ok   {f['rel']}")
+                done += 1
+            else:
+                print(f"  [{n}/{len(found)}] FAIL {f['rel']}: "
+                      f"{(up.stderr or up.stdout or '').strip()[:120]}")
+                print(f"       the original is in /trash - restore it with: "
+                      f"pd restore /trash/{f['name']}")
+                failed += 1
+            if tmp:
+                subprocess.run(["rm", "-rf", tmp])
+
+        print(f"\npruned {done}, skipped {skipped}, failed {failed}")
+        print("originals are in Proton's trash; empty it to reclaim the space")
+        return 1 if failed else 0
 
     elif cmd == "share":
         need(1, "a path")
