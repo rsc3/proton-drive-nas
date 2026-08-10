@@ -18,7 +18,7 @@ USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
   pd info <path>               full metadata incl. sha1 and size
   pd find <text>               match names in a folder     (pd find x [path])
 
-  pd add <local>... [remote]   upload; remote defaults to /my-files
+  pd add <local>... [remote]   upload, then verify and repair (--no-verify to skip)
   pd mkdir <parent> <name>     create a folder
   pd get <path>... [localdir]  download; localdir defaults to .
 
@@ -61,6 +61,160 @@ def run(*args, capture=False):
     sys.exit(r.returncode) if r.returncode else None
 
 
+def verify_path(local, remote, deep=False, fix=False):
+    """Compare a local path against Proton; return 0 if everything matches.
+
+    fix=True re-uploads anything missing or corrupt, then re-checks.
+    """
+    import hashlib
+    import json
+    import tempfile
+
+    local = os.path.abspath(local.rstrip("/"))
+    if not os.path.exists(local):
+        sys.exit(f"pd verify: no such local path: {local}")
+
+    def sha1_file(p):
+        h = hashlib.sha1()
+        with open(p, "rb") as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+        return h.hexdigest()
+
+    # Collect the remote tree: one list call per folder (no recursion flag).
+    remote_files = {}
+
+    def crawl(rpath, prefix=""):
+        data = json.loads(run("filesystem", "list", rpath, "--json",
+                              capture=True) or "[]")
+        for e in data:
+            nm = e.get("name") or {}
+            if not nm.get("ok"):
+                print(f"  ?? undecryptable name under {prefix or '/'}")
+                continue
+            name = nm["value"]
+            # Keep the true name AND the on-disk name the CLI would write,
+            # so this works whether you are checking an upload (names match)
+            # or a mirrored/downloaded copy (names were sanitised).
+            rel = f"{prefix}/{name}".lstrip("/")
+            esc = name.replace("\\", "\\\\").replace("/", "\\/")
+            if e.get("type") == "folder":
+                crawl(f"{rpath}/{esc}", rel)
+            else:
+                rev = e.get("activeRevision") or {}
+                remote_files[rel] = {
+                    "size": rev.get("claimedSize"),
+                    "sha1": ((rev.get("claimedDigests") or {})
+                             .get("sha1") or "").lower(),
+                    "path": f"{rpath}/{esc}",
+                }
+
+    if os.path.isdir(local):
+        local_files = {}
+        for dp, _dn, fn in os.walk(local):
+            for f in fn:
+                full = os.path.join(dp, f)
+                local_files[os.path.relpath(full, local)] = full
+        crawl(remote)
+    else:
+        local_files = {os.path.basename(local): local}
+        parent = remote.rsplit("/", 1)[0] or ROOT
+        crawl(parent)
+        remote_files = {k: v for k, v in remote_files.items()
+                        if k == os.path.basename(local)}
+
+    # The CLI rewrites [\x00-\x1f\x7f<>:"|?*\\/] to _ when writing to disk,
+    # so a mirrored copy of "a:b.txt" is on disk as "a_b.txt". Index remote
+    # entries under both names; exact match wins.
+    unsafe = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\/]')
+    for rel in list(remote_files):
+        alt = "/".join(unsafe.sub("_", part) for part in rel.split("/"))
+        if alt != rel and alt not in remote_files:
+            remote_files[alt] = remote_files[rel]
+
+    ok = missing = mismatch = 0
+    problems = []          # (rel, local path, needs_replace)
+    for rel in sorted(local_files):
+        lp = local_files[rel]
+        r = remote_files.get(rel)
+        if r is None:
+            print(f"  MISSING   {rel}")
+            problems.append((rel, lp, False))
+            missing += 1
+            continue
+        lsize = os.path.getsize(lp)
+        if r["size"] is not None and r["size"] != lsize:
+            print(f"  SIZE      {rel}  local={lsize} remote={r['size']}")
+            problems.append((rel, lp, True))
+            mismatch += 1
+            continue
+        lsha = sha1_file(lp)
+        if r["sha1"] and r["sha1"] != lsha:
+            print(f"  SHA1      {rel}")
+            problems.append((rel, lp, True))
+            mismatch += 1
+            continue
+        if not r["sha1"]:
+            print(f"  NO-DIGEST {rel} (size matches; cannot verify content)")
+            mismatch += 1
+            continue
+        if deep:
+            # The stored sha1 is claimed by whichever client uploaded the
+            # file; Proton does not recompute it. Downloading and re-hashing
+            # is the only check that proves a real round trip.
+            with tempfile.TemporaryDirectory() as td:
+                run("filesystem", "download", "-f", "replace",
+                    r["path"], td, capture=True)
+                got = os.path.join(td, os.path.basename(rel))
+                if not os.path.exists(got) or sha1_file(got) != lsha:
+                    print(f"  ROUNDTRIP {rel}")
+                    problems.append((rel, lp, True))
+                    mismatch += 1
+                    continue
+        ok += 1
+
+    # Aliases were injected above, so report EXTRA on true names only.
+    extra = sorted(k for k in set(remote_files) - set(local_files)
+                   if not any(remote_files.get(o) is remote_files[k]
+                              and o in local_files
+                              for o in remote_files))
+    for rel in extra:
+        print(f"  EXTRA     {rel} (in Proton, not local)")
+
+    if fix and problems:
+        print(f"\nfixing {len(problems)} file(s)...")
+        made = set()
+        for rel, lp, needs_replace in problems:
+            sub = os.path.dirname(rel)
+            parent = remote
+            # Recreate any missing intermediate folders, one level at a time.
+            for part in [p for p in sub.split(os.sep) if p]:
+                if (parent, part) not in made:
+                    subprocess.run([CLI, "filesystem", "create-folder",
+                                    parent, part],
+                                   capture_output=True, text=True)
+                    made.add((parent, part))
+                parent = f"{parent}/" + part.replace("\\", "\\\\").replace("/", "\\/")
+            # replace, not skip: skip only checks existence, so a corrupt or
+            # short file would be left exactly as it is.
+            strat = "replace" if needs_replace else "skip"
+            r2 = subprocess.run([CLI, "filesystem", "upload", "-f", strat,
+                                 lp, parent], capture_output=True, text=True)
+            state = "ok" if r2.returncode == 0 else f"FAILED rc={r2.returncode}"
+            print(f"  {strat:7} {rel}  {state}")
+        print("\nre-checking...")
+        return verify_path(local, remote, deep=deep, fix=False)
+
+    mode = "deep" if deep else "sha1"
+    print(f"\n{ok}/{len(local_files)} verified ({mode}), "
+          f"{missing} missing, {mismatch} mismatched, {len(extra)} extra")
+    if not deep and ok == len(local_files) and not missing and not mismatch:
+        print("note: sha1 is the digest the uploading client claimed; "
+              "Proton does not recompute it. Use --deep to prove a round trip.")
+    return 1 if (missing or mismatch) else 0
+
+
+
 def main(argv):
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(USAGE)
@@ -97,6 +251,8 @@ def main(argv):
 
     elif cmd == "add":
         need(1, "local files")
+        no_verify = "--no-verify" in rest
+        rest = [a for a in rest if a != "--no-verify"]
         # If the last argument exists locally it is a source, not a destination.
         if os.path.exists(rest[-1]) or len(rest) == 1:
             srcs, dest = rest, ROOT
@@ -106,7 +262,23 @@ def main(argv):
         if missing:
             sys.exit("pd add: no such local path: " + ", ".join(missing))
         print(f"uploading {len(srcs)} item(s) -> {dest}")
-        run("filesystem", "upload", "-c", "skip", *srcs, dest)
+        r = subprocess.run([CLI, "filesystem", "upload", "-c", "skip",
+                            *srcs, dest])
+        if no_verify:
+            return r.returncode
+
+        # Upload alone proves nothing: -c skip skips on existence rather than
+        # content, so re-running after a bad upload leaves the damage in place,
+        # and the CLI has been seen exiting 0 on a failed transfer. Check every
+        # file and repair what is wrong, so a repeated `pd add` converges.
+        print("\nverifying...")
+        worst = r.returncode
+        for src in srcs:
+            base = os.path.basename(os.path.abspath(src.rstrip("/")))
+            rc = verify_path(os.path.abspath(src.rstrip("/")),
+                             f"{dest}/{base}", fix=True)
+            worst = max(worst, rc)
+        return worst
 
     elif cmd == "mkdir":
         need(1, "a folder name")
@@ -156,159 +328,14 @@ def main(argv):
         run("filesystem", "delete", *[abs_remote(p) for p in rest])
 
     elif cmd == "verify":
-        import hashlib
-        import json
-        import tempfile
-
         deep = "--deep" in rest
         fix = "--fix" in rest
         rest = [a for a in rest if a not in ("--deep", "--fix")]
         need(1, "a local path")
-        local = os.path.abspath(rest[0].rstrip("/"))
-        if not os.path.exists(local):
-            sys.exit(f"pd verify: no such local path: {local}")
-        remote = (abs_remote(rest[1]) if len(rest) > 1
-                  else f"{ROOT}/{os.path.basename(local)}")
-
-        def sha1_file(p):
-            h = hashlib.sha1()
-            with open(p, "rb") as f:
-                while chunk := f.read(1 << 20):
-                    h.update(chunk)
-            return h.hexdigest()
-
-        # Collect the remote tree: one list call per folder (no recursion flag).
-        remote_files = {}
-
-        def crawl(rpath, prefix=""):
-            data = json.loads(run("filesystem", "list", rpath, "--json",
-                                  capture=True) or "[]")
-            for e in data:
-                nm = e.get("name") or {}
-                if not nm.get("ok"):
-                    print(f"  ?? undecryptable name under {prefix or '/'}")
-                    continue
-                name = nm["value"]
-                # Keep the true name AND the on-disk name the CLI would write,
-                # so this works whether you are checking an upload (names match)
-                # or a mirrored/downloaded copy (names were sanitised).
-                rel = f"{prefix}/{name}".lstrip("/")
-                esc = name.replace("\\", "\\\\").replace("/", "\\/")
-                if e.get("type") == "folder":
-                    crawl(f"{rpath}/{esc}", rel)
-                else:
-                    rev = e.get("activeRevision") or {}
-                    remote_files[rel] = {
-                        "size": rev.get("claimedSize"),
-                        "sha1": ((rev.get("claimedDigests") or {})
-                                 .get("sha1") or "").lower(),
-                        "path": f"{rpath}/{esc}",
-                    }
-
-        if os.path.isdir(local):
-            local_files = {}
-            for dp, _dn, fn in os.walk(local):
-                for f in fn:
-                    full = os.path.join(dp, f)
-                    local_files[os.path.relpath(full, local)] = full
-            crawl(remote)
-        else:
-            local_files = {os.path.basename(local): local}
-            parent = remote.rsplit("/", 1)[0] or ROOT
-            crawl(parent)
-            remote_files = {k: v for k, v in remote_files.items()
-                            if k == os.path.basename(local)}
-
-        # The CLI rewrites [\x00-\x1f\x7f<>:"|?*\\/] to _ when writing to disk,
-        # so a mirrored copy of "a:b.txt" is on disk as "a_b.txt". Index remote
-        # entries under both names; exact match wins.
-        unsafe = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\/]')
-        for rel in list(remote_files):
-            alt = "/".join(unsafe.sub("_", part) for part in rel.split("/"))
-            if alt != rel and alt not in remote_files:
-                remote_files[alt] = remote_files[rel]
-
-        ok = missing = mismatch = 0
-        problems = []          # (rel, local path, needs_replace)
-        for rel in sorted(local_files):
-            lp = local_files[rel]
-            r = remote_files.get(rel)
-            if r is None:
-                print(f"  MISSING   {rel}")
-                problems.append((rel, lp, False))
-                missing += 1
-                continue
-            lsize = os.path.getsize(lp)
-            if r["size"] is not None and r["size"] != lsize:
-                print(f"  SIZE      {rel}  local={lsize} remote={r['size']}")
-                problems.append((rel, lp, True))
-                mismatch += 1
-                continue
-            lsha = sha1_file(lp)
-            if r["sha1"] and r["sha1"] != lsha:
-                print(f"  SHA1      {rel}")
-                problems.append((rel, lp, True))
-                mismatch += 1
-                continue
-            if not r["sha1"]:
-                print(f"  NO-DIGEST {rel} (size matches; cannot verify content)")
-                mismatch += 1
-                continue
-            if deep:
-                # The stored sha1 is claimed by whichever client uploaded the
-                # file; Proton does not recompute it. Downloading and re-hashing
-                # is the only check that proves a real round trip.
-                with tempfile.TemporaryDirectory() as td:
-                    run("filesystem", "download", "-f", "replace",
-                        r["path"], td, capture=True)
-                    got = os.path.join(td, os.path.basename(rel))
-                    if not os.path.exists(got) or sha1_file(got) != lsha:
-                        print(f"  ROUNDTRIP {rel}")
-                        problems.append((rel, lp, True))
-                        mismatch += 1
-                        continue
-            ok += 1
-
-        # Aliases were injected above, so report EXTRA on true names only.
-        extra = sorted(k for k in set(remote_files) - set(local_files)
-                       if not any(remote_files.get(o) is remote_files[k]
-                                  and o in local_files
-                                  for o in remote_files))
-        for rel in extra:
-            print(f"  EXTRA     {rel} (in Proton, not local)")
-
-        if fix and problems:
-            print(f"\nfixing {len(problems)} file(s)...")
-            made = set()
-            for rel, lp, needs_replace in problems:
-                sub = os.path.dirname(rel)
-                parent = remote
-                # Recreate any missing intermediate folders, one level at a time.
-                for part in [p for p in sub.split(os.sep) if p]:
-                    if (parent, part) not in made:
-                        subprocess.run([CLI, "filesystem", "create-folder",
-                                        parent, part],
-                                       capture_output=True, text=True)
-                        made.add((parent, part))
-                    parent = f"{parent}/" + part.replace("\\", "\\\\").replace("/", "\\/")
-                # replace, not skip: skip only checks existence, so a corrupt or
-                # short file would be left exactly as it is.
-                strat = "replace" if needs_replace else "skip"
-                r2 = subprocess.run([CLI, "filesystem", "upload", "-f", strat,
-                                     lp, parent], capture_output=True, text=True)
-                state = "ok" if r2.returncode == 0 else f"FAILED rc={r2.returncode}"
-                print(f"  {strat:7} {rel}  {state}")
-            print("\nre-checking...")
-            args2 = [a for a in sys.argv[1:] if a != "--fix"]
-            return subprocess.run([sys.executable, sys.argv[0], *args2]).returncode
-
-        mode = "deep" if deep else "sha1"
-        print(f"\n{ok}/{len(local_files)} verified ({mode}), "
-              f"{missing} missing, {mismatch} mismatched, {len(extra)} extra")
-        if not deep and ok == len(local_files) and not missing and not mismatch:
-            print("note: sha1 is the digest the uploading client claimed; "
-                  "Proton does not recompute it. Use --deep to prove a round trip.")
-        return 1 if (missing or mismatch) else 0
+        loc = os.path.abspath(rest[0].rstrip("/"))
+        rem = (abs_remote(rest[1]) if len(rest) > 1
+               else f"{ROOT}/{os.path.basename(loc)}")
+        return verify_path(loc, rem, deep=deep, fix=fix)
 
     elif cmd == "share":
         need(1, "a path")

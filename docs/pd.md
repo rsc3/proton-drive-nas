@@ -47,6 +47,15 @@ Uses `-c skip`, so files that already exist are left alone rather than duplicate
 Existence is checked locally first, and it refuses rather than half-uploading if a
 path is missing.
 
+**`add` verifies itself.** After uploading it compares every file against
+Proton by size and sha1, repairs anything missing or corrupt, and re-checks. So
+re-running `pd add` on a partly-failed upload **converges** — which plain `add`
+alone would not, because `-c skip` skips on existence rather than content and
+would step straight over a corrupt file.
+
+Use `pd add --no-verify ...` to skip the check on very large uploads, where
+hashing everything locally costs real time.
+
 ### Rearranging
 
 ```sh
