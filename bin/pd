@@ -19,6 +19,8 @@ USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
   pd find <text>               match names in a folder     (pd find x [path])
 
   pd add <local>... [remote]   upload, then verify and repair (--no-verify to skip)
+                               overwrites Proton copies that DIFFER from local;
+                               files that exist only in Proton are left alone
   pd mkdir <parent> <name>     create a folder
   pd get <path>... [localdir]  download; localdir defaults to .
 
@@ -182,6 +184,13 @@ def verify_path(local, remote, deep=False, fix=False):
         print(f"  EXTRA     {rel} (in Proton, not local)")
 
     if fix and problems:
+        replacing = [p for p in problems if p[2]]
+        if replacing:
+            print(f"\nWARNING: {len(replacing)} file(s) differ from Proton and "
+                  f"will be OVERWRITTEN with the local copy.")
+            print("         If you edited them in Proton (web UI or another "
+                  "client), that version is lost.")
+            print("         Files that exist only in Proton are never touched.")
         print(f"\nfixing {len(problems)} file(s)...")
         made = set()
         for rel, lp, needs_replace in problems:

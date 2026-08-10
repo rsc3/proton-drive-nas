@@ -56,6 +56,32 @@ would step straight over a corrupt file.
 Use `pd add --no-verify ...` to skip the check on very large uploads, where
 hashing everything locally costs real time.
 
+#### What `add` overwrites, and what it leaves alone
+
+> **`add` pushes local → Proton.** A file that exists in both but *differs* is
+> overwritten with your local copy. If you edited it in Proton's web UI and your
+> local copy is stale, that edit is lost. `add` prints a warning naming how many
+> files it is about to replace.
+
+Files that exist **only in Proton are never touched.** So the common case is safe:
+create a file in the web UI inside a folder, then re-run `pd add` on your local
+copy of that folder, and the new file stays exactly where it is. It's reported as
+`EXTRA` — informational only, and it does **not** make the command fail.
+
+Verified behaviour when re-adding a directory:
+
+| Situation | Result |
+|---|---|
+| Local file, not in Proton | uploaded |
+| Identical in both | left alone |
+| Differs (you changed it locally) | **Proton copy overwritten** |
+| Differs (you changed it in the web UI) | **Proton copy overwritten** — the risk |
+| Exists only in Proton | **preserved**, listed as `EXTRA`, exit stays 0 |
+
+Nothing here does two-way reconciliation. It can't reliably: the CLI cannot set
+modification times, so there is no dependable way to tell which side is newer.
+If you edit in the web UI, `pd get` the file before touching the local copy.
+
 ### Rearranging
 
 ```sh
