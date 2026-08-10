@@ -178,6 +178,41 @@ Not fully understood. `nas-task.sh` absorbs it by retrying once after 30 s on
   trashed may still appear.
 - Undecryptable filenames exist in the wild; the engine skips and logs them.
 
+### Thumbnail generation blocks uploads
+
+The single biggest cause of bulk-upload failures. The CLI tries to generate a
+thumbnail for anything it believes is an image and **rejects the whole file** if
+it can't:
+
+```text
+ValidationError: Failed to generate thumbnails (use --skip-thumbnails to upload
+without thumbnails): Image: format not supported on this machine
+Image: unrecognised format (expected JPEG, PNG, WebP, GIF, BMP, TIFF, HEIC or AVIF)
+```
+
+Two triggers, both ordinary:
+
+- **TIFF/HEIC/AVIF** need an OS codec that frequently isn't installed.
+- **Extensions that lie about content** — a `.jpg` holding text, a `.gif` holding
+  an executable. Real archives are full of these.
+
+One upload of ~3,500 files failed almost entirely on this.
+
+`-t` / `--skip-thumbnails` fixes it. Reproduced with a TIFF, a text file named
+`.jpg`, and a DOS executable named `.gif`: all three failed without `-t`, all
+three uploaded with it.
+
+`pd add` keeps thumbnails on the first pass and uses `-t` in its repair pass, so
+a plain `pd add` converges without intervention. `--no-thumbs` skips the doomed
+first attempt for trees known to be full of such files.
+
+Not fixed by `-t`, and not reproducible here:
+
+```text
+ValidationError: The mime type of the file is invalid ("application/x-dosexec").
+Allowed mime types are "application/octet-stream".
+```
+
 ### A failed download can still exit 0
 
 Downloading from `/shared-with-me` on one machine printed:

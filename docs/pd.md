@@ -56,6 +56,47 @@ would step straight over a corrupt file.
 Use `pd add --no-verify ...` to skip the check on very large uploads, where
 hashing everything locally costs real time.
 
+#### Thumbnail failures
+
+By far the most common upload failure. The CLI generates a thumbnail for anything
+it thinks is an image, and refuses the whole file if it can't:
+
+```text
+ValidationError: Failed to generate thumbnails (use --skip-thumbnails to upload
+without thumbnails): Image: format not supported on this machine (HEIC/AVIF/TIFF
+require the OS codec...)
+```
+
+Two causes, both common in real directories:
+
+- **TIFF, HEIC and AVIF** need an OS codec that often isn't present.
+- **Any file whose extension lies about its content** — a `.jpg` that's really
+  text, a `.gif` that's really an executable — gets `unrecognised format`.
+
+You don't have to do anything: the repair pass uploads with `--skip-thumbnails`,
+so a plain `pd add` fails those files on the first pass and then gets them
+through on the second, ending with everything verified.
+
+If you already know a tree is full of TIFFs or mislabelled files, skip the
+pointless first attempt:
+
+```sh
+pd add --no-thumbs ~/scans
+```
+
+The cost is no thumbnails in Proton's apps for those files. Everything else is
+unaffected, since the first pass still tries.
+
+One failure this does *not* fix is a rejected mime type:
+
+```text
+ValidationError: The mime type of the file is invalid ("application/x-dosexec").
+Allowed mime types are "application/octet-stream".
+```
+
+This may be the same thumbnail path; it was not reproducible here. If files fail
+that way after a repair pass, they need renaming or repackaging.
+
 #### What `add` overwrites, and what it leaves alone
 
 > **`add` pushes local → Proton.** A file that exists in both but *differs* is
@@ -71,7 +112,7 @@ copy of that folder, and the new file stays exactly where it is. It's reported a
 Verified behaviour when re-adding a directory:
 
 | Situation | Result |
-|---|---|
+| --- | --- |
 | Local file, not in Proton | uploaded |
 | Identical in both | left alone |
 | Differs (you changed it locally) | **Proton copy overwritten** |
@@ -131,10 +172,11 @@ pd verify --fix ~/stuff/project
 Missing files are uploaded; corrupt ones are re-uploaded with `replace`, then it
 re-checks automatically.
 
-**Why you cannot just re-run `pd add` to fix things.** `add` uses `-c skip`,
-which skips on *existence*, not content. A file that uploaded short or corrupt is
-skipped on the retry and stays broken forever. Repeating `add` fills in files
-that never arrived; only `--fix` (or `replace`) repairs damaged ones.
+**Why `add` has to do this rather than just re-uploading.** The underlying
+`-c skip` skips on *existence*, not content, so a file that uploaded short or
+corrupt would be skipped on every retry and stay broken forever. Repeating a bare
+upload fills in files that never arrived but never repairs damaged ones — which
+is why `add` runs this check and re-uploads mismatches with `replace`.
 
 For proof rather than a metadata check:
 

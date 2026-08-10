@@ -19,6 +19,8 @@ USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
   pd find <text>               match names in a folder     (pd find x [path])
 
   pd add <local>... [remote]   upload, then verify and repair (--no-verify to skip)
+                               --no-thumbs: skip thumbnails (much faster, and
+                                 avoids failures on TIFF/odd files)
                                overwrites Proton copies that DIFFER from local;
                                files that exist only in Proton are left alone
   pd mkdir <parent> <name>     create a folder
@@ -206,8 +208,13 @@ def verify_path(local, remote, deep=False, fix=False):
                 parent = f"{parent}/" + part.replace("\\", "\\\\").replace("/", "\\/")
             # replace, not skip: skip only checks existence, so a corrupt or
             # short file would be left exactly as it is.
+            # -t here on purpose: thumbnail generation is the single biggest
+            # cause of upload failures (TIFF needs an OS codec; anything whose
+            # extension lies about its content is rejected outright). The first
+            # pass tries for thumbnails; the repair pass prioritises getting the
+            # bytes there.
             strat = "replace" if needs_replace else "skip"
-            r2 = subprocess.run([CLI, "filesystem", "upload", "-f", strat,
+            r2 = subprocess.run([CLI, "filesystem", "upload", "-t", "-f", strat,
                                  lp, parent], capture_output=True, text=True)
             state = "ok" if r2.returncode == 0 else f"FAILED rc={r2.returncode}"
             print(f"  {strat:7} {rel}  {state}")
@@ -261,7 +268,8 @@ def main(argv):
     elif cmd == "add":
         need(1, "local files")
         no_verify = "--no-verify" in rest
-        rest = [a for a in rest if a != "--no-verify"]
+        no_thumbs = "--no-thumbs" in rest
+        rest = [a for a in rest if a not in ("--no-verify", "--no-thumbs")]
         # If the last argument exists locally it is a source, not a destination.
         if os.path.exists(rest[-1]) or len(rest) == 1:
             srcs, dest = rest, ROOT
@@ -270,9 +278,12 @@ def main(argv):
         missing = [s for s in srcs if not os.path.exists(s)]
         if missing:
             sys.exit("pd add: no such local path: " + ", ".join(missing))
-        print(f"uploading {len(srcs)} item(s) -> {dest}")
-        r = subprocess.run([CLI, "filesystem", "upload", "-c", "skip",
-                            *srcs, dest])
+        print(f"uploading {len(srcs)} item(s) -> {dest}"
+              + (" (no thumbnails)" if no_thumbs else ""))
+        cmd_args = [CLI, "filesystem", "upload", "-c", "skip"]
+        if no_thumbs:
+            cmd_args.append("-t")
+        r = subprocess.run([*cmd_args, *srcs, dest])
         if no_verify:
             return r.returncode
 
