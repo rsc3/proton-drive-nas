@@ -18,11 +18,12 @@ USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
   pd info <path>               full metadata incl. sha1 and size
   pd find <text>               match names in a folder     (pd find x [path])
 
-  pd add <local>... [remote]   upload, then verify and repair (--no-verify to skip)
-                               --no-thumbs: skip thumbnails (much faster, and
-                                 avoids failures on TIFF/odd files)
+  pd add <local>... [remote]   upload, then verify and repair
+                               no thumbnails by default (--thumbs to generate
+                                 them; they make TIFF and odd files fail)
                                overwrites Proton copies that DIFFER from local;
                                files that exist only in Proton are left alone
+                               --no-verify skips the post-upload check
   pd mkdir <parent> <name>     create a folder
   pd get <path>... [localdir]  download; localdir defaults to .
 
@@ -268,8 +269,14 @@ def main(argv):
     elif cmd == "add":
         need(1, "local files")
         no_verify = "--no-verify" in rest
-        no_thumbs = "--no-thumbs" in rest
-        rest = [a for a in rest if a not in ("--no-verify", "--no-thumbs")]
+        # Thumbnails are off by default. They are generated for anything that
+        # looks like an image and REJECT THE WHOLE FILE when they fail, which
+        # they do for TIFF/HEIC/AVIF and for any file whose extension lies about
+        # its content. Opting in costs upload time and gains previews in
+        # Proton's apps; opting out just works.
+        want_thumbs = "--thumbs" in rest
+        rest = [a for a in rest
+                if a not in ("--no-verify", "--thumbs", "--no-thumbs")]
         # If the last argument exists locally it is a source, not a destination.
         if os.path.exists(rest[-1]) or len(rest) == 1:
             srcs, dest = rest, ROOT
@@ -279,9 +286,9 @@ def main(argv):
         if missing:
             sys.exit("pd add: no such local path: " + ", ".join(missing))
         print(f"uploading {len(srcs)} item(s) -> {dest}"
-              + (" (no thumbnails)" if no_thumbs else ""))
+              + (" (with thumbnails)" if want_thumbs else ""))
         cmd_args = [CLI, "filesystem", "upload", "-c", "skip"]
-        if no_thumbs:
+        if not want_thumbs:
             cmd_args.append("-t")
         r = subprocess.run([*cmd_args, *srcs, dest])
         if no_verify:

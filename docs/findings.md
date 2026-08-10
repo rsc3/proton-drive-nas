@@ -202,9 +202,9 @@ One upload of ~3,500 files failed almost entirely on this.
 `.jpg`, and a DOS executable named `.gif`: all three failed without `-t`, all
 three uploaded with it.
 
-`pd add` keeps thumbnails on the first pass and uses `-t` in its repair pass, so
-a plain `pd add` converges without intervention. `--no-thumbs` skips the doomed
-first attempt for trees known to be full of such files.
+`pd add` therefore passes `-t` by default; `--thumbs` opts back in, and even then
+the repair pass uses `-t` so failures still land. Thumbnails are a preview
+convenience in the Proton apps, not something worth failing an upload over.
 
 Not fixed by `-t`, and not reproducible here:
 

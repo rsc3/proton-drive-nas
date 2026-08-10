@@ -56,10 +56,13 @@ would step straight over a corrupt file.
 Use `pd add --no-verify ...` to skip the check on very large uploads, where
 hashing everything locally costs real time.
 
-#### Thumbnail failures
+#### Thumbnails are off by default
 
-By far the most common upload failure. The CLI generates a thumbnail for anything
-it thinks is an image, and refuses the whole file if it can't:
+`add` passes `--skip-thumbnails`. This is deliberate, and it is the difference
+between uploads that work and uploads that don't.
+
+The CLI generates a thumbnail for anything it believes is an image and **rejects
+the whole file** when it can't:
 
 ```text
 ValidationError: Failed to generate thumbnails (use --skip-thumbnails to upload
@@ -67,35 +70,33 @@ without thumbnails): Image: format not supported on this machine (HEIC/AVIF/TIFF
 require the OS codec...)
 ```
 
-Two causes, both common in real directories:
+Two triggers, both ordinary in real directories:
 
-- **TIFF, HEIC and AVIF** need an OS codec that often isn't present.
-- **Any file whose extension lies about its content** — a `.jpg` that's really
-  text, a `.gif` that's really an executable — gets `unrecognised format`.
+- **TIFF, HEIC and AVIF** need an OS codec that often isn't installed.
+- **Any file whose extension lies about its content** — a `.jpg` holding text, a
+  `.gif` holding an executable — fails as `unrecognised format`.
 
-You don't have to do anything: the repair pass uploads with `--skip-thumbnails`,
-so a plain `pd add` fails those files on the first pass and then gets them
-through on the second, ending with everything verified.
+One upload of ~3,500 files failed almost entirely this way. Turning thumbnails
+off makes it a non-event, and uploads are quicker for it.
 
-If you already know a tree is full of TIFFs or mislabelled files, skip the
-pointless first attempt:
+What you give up is preview images in Proton's web and mobile apps for files
+uploaded this way. If you want them:
 
 ```sh
-pd add --no-thumbs ~/scans
+pd add --thumbs ~/photos
 ```
 
-The cost is no thumbnails in Proton's apps for those files. Everything else is
-unaffected, since the first pass still tries.
+Even then you're covered: the repair pass always uses `--skip-thumbnails`, so
+anything that fails thumbnail generation still gets uploaded on the second pass.
 
-One failure this does *not* fix is a rejected mime type:
+One failure this does *not* explain is a rejected mime type:
 
 ```text
 ValidationError: The mime type of the file is invalid ("application/x-dosexec").
 Allowed mime types are "application/octet-stream".
 ```
 
-This may be the same thumbnail path; it was not reproducible here. If files fail
-that way after a repair pass, they need renaming or repackaging.
+Not reproducible here. If files fail that way, they need renaming or repackaging.
 
 #### What `add` overwrites, and what it leaves alone
 
