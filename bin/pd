@@ -55,15 +55,27 @@ def abs_remote(p):
     return p if p.startswith("/") else f"{ROOT}/{p}"
 
 
-def run(*args, capture=False):
-    r = subprocess.run([CLI, *args],
-                       capture_output=capture, text=True)
-    if capture:
-        if r.returncode != 0:
-            sys.stderr.write(r.stderr or "")
+def run(*args, capture=False, attempts=3):
+    # Transient failures happen: a single list call can come back "You need to
+    # login first" while the session is perfectly valid (the CLI reloads and
+    # refreshes the session on every invocation). Without a retry, one blip
+    # aborts a whole verify run and looks like being logged out.
+    import time
+    delay = 2.0
+    for n in range(attempts):
+        r = subprocess.run([CLI, *args], capture_output=capture, text=True)
+        if r.returncode == 0:
+            return r.stdout if capture else None
+        if not capture:
             sys.exit(r.returncode)
-        return r.stdout
-    sys.exit(r.returncode) if r.returncode else None
+        msg = ((r.stderr or "") + (r.stdout or "")).strip()
+        if n == attempts - 1:
+            sys.stderr.write(msg + "\n")
+            sys.exit(f"pd: '{' '.join(args)}' failed after {attempts} attempts")
+        print(f"  retrying after: {msg.splitlines()[0][:80] if msg else 'error'}",
+              file=sys.stderr)
+        time.sleep(delay)
+        delay *= 2
 
 
 def verify_path(local, remote, deep=False, fix=False):
@@ -287,7 +299,11 @@ def main(argv):
             sys.exit("pd add: no such local path: " + ", ".join(missing))
         print(f"uploading {len(srcs)} item(s) -> {dest}"
               + (" (with thumbnails)" if want_thumbs else ""))
-        cmd_args = [CLI, "filesystem", "upload", "-c", "skip"]
+        # -d merge, NOT -c skip. With skip applied to folders, re-adding a
+        # directory that already exists skips the ENTIRE folder and uploads
+        # nothing inside it. merge descends into it; skip then applies to the
+        # files, leaving identical ones alone.
+        cmd_args = [CLI, "filesystem", "upload", "-d", "merge", "-f", "skip"]
         if not want_thumbs:
             cmd_args.append("-t")
         r = subprocess.run([*cmd_args, *srcs, dest])

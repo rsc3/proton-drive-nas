@@ -213,6 +213,44 @@ ValidationError: The mime type of the file is invalid ("application/x-dosexec").
 Allowed mime types are "application/octet-stream".
 ```
 
+### "You need to login first" is often a lie
+
+A single `filesystem list` can fail with:
+
+```text
+You need to login first
+```
+
+...while the session is perfectly valid — running the same command immediately
+afterwards succeeds, and other commands work throughout. The CLI loads and
+refreshes its session on *every* invocation, so there is a window in which a call
+can fail spuriously.
+
+This matters for any script making many calls in a row: one blip aborts the whole
+run and looks exactly like being logged out. `pd` retries three times with
+backoff before believing it.
+
+Check whether you are actually logged out with a plain `pd ls` before
+re-authenticating. Re-logging in unnecessarily creates yet another session and
+invalidates the one the NAS may be using.
+
+### `-c skip` skips whole folders, not just files
+
+`filesystem upload -c skip` applies the strategy to folders too, so re-uploading
+a directory that already exists in Proton skips **the entire directory** and
+uploads nothing inside it:
+
+```text
+Transfer summary:
+  Uploaded: 0 items (0 B)
+  Skipped: 1 items
+  - projects_
+```
+
+That is not what anyone means by "skip existing". Use `-d merge -f skip`:
+`merge` descends into the existing folder, and `skip` then applies to the files
+within it, leaving identical ones alone.
+
 ### A failed download can still exit 0
 
 Downloading from `/shared-with-me` on one machine printed:
