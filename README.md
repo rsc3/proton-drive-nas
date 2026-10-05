@@ -45,6 +45,7 @@ evidence — worth reading before you try to "simplify" any of this.
 | [`nas/pd_sync.py`](nas/pd_sync.py) | The mirror engine. Walks Proton, diffs by sha1, downloads changes, trashes removals |
 | [`nas/nas-task.sh`](nas/nas-task.sh) | What DSM Task Scheduler actually runs |
 | [`nas/bootstrap.sh`](nas/bootstrap.sh) | The few lines you paste into DSM, once |
+| [`nas/qbt-on-complete.sh`](nas/qbt-on-complete.sh) | Optional qBittorrent completion hook that uploads finished torrents to Proton; setup is in its header |
 | [`scripts/build-baseline-cli.sh`](scripts/build-baseline-cli.sh) | Builds the AVX2-free CLI binary |
 | [docs/setup.md](docs/setup.md) | Step-by-step install |
 | [docs/pd.md](docs/pd.md) | `pd` command reference |

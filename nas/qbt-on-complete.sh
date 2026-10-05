@@ -54,8 +54,10 @@ esac
 SIZE=$(du -sh "$SRC" 2>/dev/null | cut -f1)
 log "uploading $SIZE -> $REMOTE_PARENT"
 
-# -c skip: re-running after a partial upload resumes rather than duplicating.
-if "$CLI" filesystem upload -t -c skip "$SRC" "$REMOTE_PARENT" >> "$LOG" 2>&1; then
+# -d merge -f skip: re-running after a partial upload resumes rather than
+# duplicating. Not -c skip, which would skip a half-uploaded folder whole
+# (docs/findings.md). Never replace/keep-both: they create extra versions.
+if "$CLI" filesystem upload -t -d merge -f skip "$SRC" "$REMOTE_PARENT" >> "$LOG" 2>&1; then
     log "OK: $NAME uploaded"
     # The local copy is left in place on purpose: deleting it would stop you
     # seeding, and the nightly mirror will bring a copy back down anyway.
