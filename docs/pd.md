@@ -43,14 +43,15 @@ pd add *.mp4 videos        # upload into a folder
 pd add ~/somedir videos    # folders work; uploaded recursively
 ```
 
-Uses `-c skip`, so files that already exist are left alone rather than duplicated.
+Uses `-d merge -f skip`: existing folders are merged into and files that already
+exist are left alone, never duplicated.
 Existence is checked locally first, and it refuses rather than half-uploading if a
 path is missing.
 
 **`add` verifies itself.** After uploading it compares every file against
 Proton by size and sha1, repairs anything missing or corrupt, and re-checks. So
 re-running `pd add` on a partly-failed upload **converges** — which plain `add`
-alone would not, because `-c skip` skips on existence rather than content and
+alone would not, because `-f skip` skips on existence rather than content and
 would step straight over a corrupt file.
 
 Use `pd add --no-verify ...` to skip the check on very large uploads, where
@@ -174,7 +175,7 @@ Missing files are uploaded; corrupt ones are re-uploaded with `replace`, then it
 re-checks automatically.
 
 **Why `add` has to do this rather than just re-uploading.** The underlying
-`-c skip` skips on *existence*, not content, so a file that uploaded short or
+`-f skip` skips on *existence*, not content, so a file that uploaded short or
 corrupt would be skipped on every retry and stay broken forever. Repeating a bare
 upload fills in files that never arrived but never repairs damaged ones — which
 is why `add` runs this check and re-uploads mismatches with `replace`.

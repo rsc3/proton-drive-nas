@@ -312,7 +312,7 @@ def main(argv):
         if no_verify:
             return r.returncode
 
-        # Upload alone proves nothing: -c skip skips on existence rather than
+        # Upload alone proves nothing: -f skip skips on existence rather than
         # content, so re-running after a bad upload leaves the damage in place,
         # and the CLI has been seen exiting 0 on a failed transfer. Check every
         # file and repair what is wrong, so a repeated `pd add` converges.
