@@ -54,6 +54,9 @@ LOG=$BASE/log/sync.log
 # store in $BASE/state. See README security note.
 CLI_ENV="-e PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file \
 -e PROTON_DRIVE_CACHE_DIR=/state -e PROTON_DRIVE_BIN=/opt/proton-drive -e HOME=/state"
+# Containers default to UTC. DSM keeps a POSIX TZ string in /etc/TZ, which
+# needs no zoneinfo in the image, so every line of sync.log is in local time.
+[ -r /etc/TZ ] && CLI_ENV="$CLI_ENV -e TZ=$(cat /etc/TZ)"
 
 mkdir -p "$BASE/log" "$BASE/bin" "$BASE/sync" "$BASE/state" "$DATA"
 exec >> "$LOG" 2>&1
@@ -126,8 +129,10 @@ done
 # Narrow purpose: prove this CPU can execute the binary at all. Only a fatal
 # signal means "wrong CPU build" (132=SIGILL). Anything else is an application
 # complaint that the real run will report properly, so don't abort on it.
+# Run as $OWNER like the sync: the CLI creates its cache files on start, and
+# root-owned ones would lock the sync out (docs/findings.md).
 echo "--- smoke test ---"
-"$DOCKER" run --rm $CLI_ENV \
+"$DOCKER" run --rm --user "$OWNER" $CLI_ENV \
     -v "$BASE/bin/proton-drive":/opt/proton-drive:ro \
     -v "$BASE/state":/state \
     "$IMAGE" /opt/proton-drive --version
@@ -191,8 +196,8 @@ for entry in $SECTIONS; do
     run_sync "$section" "$target" "$extra"
     rc=$?
 
-    # The first run after a session-cache rebuild fails and the next succeeds.
-    # Absorb that instead of needing a human. Never retry rc=2 (rate limited).
+    # Retry once for transient errors instead of needing a human. Never retry
+    # rc=2 (rate limited).
     if [ $rc -eq 1 ]; then
         echo "--- $section rc=1; retrying once after 30s ---"
         sleep 30

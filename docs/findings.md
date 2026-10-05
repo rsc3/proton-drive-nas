@@ -155,13 +155,31 @@ first:
 
 Remove 2–4 manually, then log in again.
 
-## The first run after a cache rebuild fails
+## The first run after a cache rebuild failed: root-owned cache files
 
-Reproducible: whenever the session cache is cleared (new credentials, cleared
-cache), the next sync fails, and the run after that succeeds. Observed repeatedly.
+This failure was reproducible. Whenever the cache was cleared (new credentials, or
+a manual reset), the next sync failed, and the run after it succeeded. The log
+shows the cause:
 
-Not fully understood. `nas-task.sh` absorbs it by retrying once after 30 s on
-`rc=1` — deliberately *not* on `rc=2`, which means rate-limited and must back off.
+```text
+EACCES: permission denied, open '/state/events.json'
+```
+
+The CLI creates its cache files (`events.json`, `cache-*.sqlite`) whenever it
+starts. `nas-task.sh` ran its CPU smoke test as the container's default user,
+which is root, and that test was the first CLI start after a reset. So it
+created those files owned by root with mode 0644. The sync then runs as
+`$OWNER`, which can read them but not write them, and every section failed.
+
+The next night's run fixed ownership at its start, which is why the run after
+always worked. Retrying after 30 s couldn't help, because nothing changed the
+ownership in between.
+
+Fixed: the smoke test now runs as `$OWNER` too. The rule is that no container
+may touch `$BASE/state` as root.
+
+`nas-task.sh` still retries once after 30 s on `rc=1`, for transient errors. It
+deliberately does *not* retry on `rc=2`, which means rate-limited and must back off.
 
 ## A leftover event lock silently freezes the mirror
 
@@ -181,8 +199,7 @@ happened from the second night of syncing:
 
 `nas-task.sh` now deletes `events.lock` right after taking its run lock, before
 any CLI starts. To recover a cache that is already stale, also delete
-`events.json` and `cache-*.sqlite*` once, as a session reset does. Then expect
-the first-run failure described above.
+`events.json` and `cache-*.sqlite*` once, as a session reset does.
 
 To check it's healthy, look at `events.json`: its modification time should change
 on every run.

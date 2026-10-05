@@ -143,8 +143,7 @@ Then **Run** it manually. Output goes to `$BASE/log/sync.log`, mirrored to
 `$STAGE/sync.log` on exit. A `$STAGE/RUNNING` file exists while a run is in
 flight, since DSM won't tell you.
 
-Expect the first run to fail and the second to succeed if the session cache was
-just created — the script retries once automatically. Look for:
+Look for:
 
 ```text
 binary: baseline build, verified
