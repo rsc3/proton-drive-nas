@@ -163,6 +163,30 @@ cache), the next sync fails, and the run after that succeeds. Observed repeatedl
 Not fully understood. `nas-task.sh` absorbs it by retrying once after 30 s on
 `rc=1` — deliberately *not* on `rc=2`, which means rate-limited and must back off.
 
+## A leftover event lock silently freezes the mirror
+
+The CLI keeps its cached folder tree current by following Proton's event stream.
+One process at a time claims that job by writing its PID to `events.lock` in the
+cache directory, and the lock counts as held while that PID is alive.
+
+In a container, PID 1 always exists. In the sync container, PID 1 is the Python
+engine. So a lock containing `{"pid":1}` never looks stale. On the NAS this
+happened from the second night of syncing:
+
+- `events.json` and `events.lock` stopped changing.
+- The log showed "Disposing events manager" every run, but never "Updating latest
+  event ID".
+- For two months, folders added in Proton were missing from the mirror, with no
+  error. Meanwhile the laptop's CLI, which has its own cache, listed them.
+
+`nas-task.sh` now deletes `events.lock` right after taking its run lock, before
+any CLI starts. To recover a cache that is already stale, also delete
+`events.json` and `cache-*.sqlite*` once, as a session reset does. Then expect
+the first-run failure described above.
+
+To check it's healthy, look at `events.json`: its modification time should change
+on every run.
+
 ## Other CLI behaviours
 
 - `filesystem list` has **no recursion flag**. One call per folder.

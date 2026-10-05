@@ -93,7 +93,8 @@ if [ -f "$STAGE/auth-session.json.new" ]; then
     [ -f "$STAGE/clientUid.json.new" ] \
         && cp "$STAGE/clientUid.json.new" "$BASE/state/clientUid.json" \
         && echo "installed new clientUid.json"
-    rm -f "$BASE/state"/cache-*.sqlite* "$BASE/state"/events.json
+    rm -f "$BASE/state"/cache-*.sqlite* "$BASE/state"/events.json \
+          "$BASE/state"/events.lock
     echo "cleared stale session cache"
     shred -u "$STAGE/auth-session.json.new" 2>/dev/null \
         || rm -f "$STAGE/auth-session.json.new"
@@ -147,6 +148,11 @@ if command -v flock >/dev/null 2>&1; then
     exec 9>"$BASE/sync.lock"
     flock -n 9 || { echo "another run in progress, exiting"; exit 0; }
 fi
+# The CLI's event lock records its owner's PID. In a container that is often 1,
+# which always looks alive, so a leftover lock silently stops event updates and
+# the entity cache goes stale (docs/findings.md). We hold the run lock and no
+# CLI is running yet, so any lock here is leftover.
+rm -f "$BASE/state/events.lock"
 
 # --- sync each section -------------------------------------------------------
 run_sync() {  # $1=remote section  $2=target dir  $3=extra args
