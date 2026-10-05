@@ -175,8 +175,16 @@ The next night's run fixed ownership at its start, which is why the run after
 always worked. Retrying after 30 s couldn't help, because nothing changed the
 ownership in between.
 
-Fixed: the smoke test now runs as `$OWNER` too. The rule is that no container
-may touch `$BASE/state` as root.
+Fixed: the smoke test now runs as `$OWNER` and doesn't use `$BASE/state` at all.
+It gets a throwaway cache inside its container instead. Its CLI runs as PID 1,
+so if it left an event lock, the lock would read `{"pid":1}`, the value that
+froze the mirror (below).
+
+`nas-task.sh` also takes its run lock first, before writing the RUNNING marker,
+installing staged files, or running the smoke test. The run lock used to come
+after all of those. So a scheduled run that started during a long manual run
+would delete the marker on its way out, and could run its smoke test against
+the live state.
 
 `nas-task.sh` still retries once after 30 s on `rc=1`, for transient errors. It
 deliberately does *not* retry on `rc=2`, which means rate-limited and must back off.

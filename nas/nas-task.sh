@@ -39,10 +39,12 @@ SECTIONS="/my-files:my-files /shared-with-me:shared-with-me:no-delete"
 # and die with "syntax error: unexpected end of file". Since this file lives on a
 # network share precisely so it can be updated at any time, copy it somewhere
 # private and re-exec from there. The window before this runs is a few lines.
+# cp to a temp name then mv: a second run starting mid-run swaps in a new file
+# instead of rewriting the one the running shell is still reading.
 if [ -z "${PD_RELOCATED:-}" ] && [ -f "$0" ]; then
     PRIV=$BASE/nas-task.run.sh
     mkdir -p "$BASE"
-    if cp "$0" "$PRIV" 2>/dev/null; then
+    if cp "$0" "$PRIV.tmp" 2>/dev/null && mv -f "$PRIV.tmp" "$PRIV"; then
         PD_RELOCATED=1 export PD_RELOCATED
         exec /bin/sh "$PRIV" "$@"
     fi
@@ -60,6 +62,17 @@ CLI_ENV="-e PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file \
 
 mkdir -p "$BASE/log" "$BASE/bin" "$BASE/sync" "$BASE/state" "$DATA"
 exec >> "$LOG" 2>&1
+
+# --- lock --------------------------------------------------------------------
+# Taken before anything else, so a run started while another is in progress
+# (the midnight schedule during a long manual run) touches nothing: not the
+# marker, the staged installs, the state dir, or the walk. Two concurrent
+# syncs would have one walking while the other downloads, and a partial tree
+# can look like deletions.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$BASE/sync.lock"
+    flock -n 9 || { echo "$(date '+%Y-%m-%d %H:%M:%S') another run in progress, exiting"; exit 0; }
+fi
 
 # Mirror the log (and the CLI's own log) somewhere network-readable on every
 # exit, including aborts. Clear the run marker.
@@ -129,12 +142,14 @@ done
 # Narrow purpose: prove this CPU can execute the binary at all. Only a fatal
 # signal means "wrong CPU build" (132=SIGILL). Anything else is an application
 # complaint that the real run will report properly, so don't abort on it.
-# Run as $OWNER like the sync: the CLI creates its cache files on start, and
-# root-owned ones would lock the sync out (docs/findings.md).
+# The CLI creates cache files and takes the event lock even for --version, so
+# give it a throwaway cache inside the container rather than $BASE/state: run
+# as root it left root-owned files the sync couldn't write, and as PID 1 it
+# could leave a lock that stops event updates (docs/findings.md).
 echo "--- smoke test ---"
 "$DOCKER" run --rm --user "$OWNER" $CLI_ENV \
+    -e PROTON_DRIVE_CACHE_DIR=/tmp -e HOME=/tmp \
     -v "$BASE/bin/proton-drive":/opt/proton-drive:ro \
-    -v "$BASE/state":/state \
     "$IMAGE" /opt/proton-drive --version
 rc=$?
 case $rc in
@@ -146,17 +161,10 @@ case $rc in
     *) echo "smoke test rc=$rc (not a CPU fault); continuing" ;;
 esac
 
-# --- lock --------------------------------------------------------------------
-# Two concurrent runs would have one walking while the other downloads, and a
-# partial tree can look like deletions.
-if command -v flock >/dev/null 2>&1; then
-    exec 9>"$BASE/sync.lock"
-    flock -n 9 || { echo "another run in progress, exiting"; exit 0; }
-fi
 # The CLI's event lock records its owner's PID. In a container that is often 1,
 # which always looks alive, so a leftover lock silently stops event updates and
 # the entity cache goes stale (docs/findings.md). We hold the run lock and no
-# CLI is running yet, so any lock here is leftover.
+# CLI is using $BASE/state yet, so any lock here is leftover.
 rm -f "$BASE/state/events.lock"
 
 # --- sync each section -------------------------------------------------------
