@@ -178,6 +178,28 @@ Not fully understood. `nas-task.sh` absorbs it by retrying once after 30 s on
   trashed may still appear.
 - Undecryptable filenames exist in the wild; the engine skips and logs them.
 
+### Upload speed is set by Proton, not by your connection
+
+Measured on a ~335 Mb/s symmetric line, with a speed test confirming the line
+itself reaches ~340 Mb/s up:
+
+| Upload | Rate | Limited by |
+| --- | --- | --- |
+| tiny files (≤100 KB) | a few files per second, ~0.1–0.3 MB/s | API round trips for each file |
+| one 62 MB file | ~5.7 MB/s (~46 Mb/s) | 4 MB blocks to Frankfurt/Zurich storage, ~1 MB/s each, ~12 in parallel |
+
+So a tree with tens of thousands of small files is slow however fast the uplink
+is, and a faster plan wouldn't help. Large files are the fast path.
+
+### `upload -f skip` re-reads everything it skips
+
+With `-f skip`, the CLI doesn't trust names. It reads and hashes each local file
+whose name already exists remotely, on a single core, before skipping it.
+Resuming a 106 GB tree that was half uploaded re-read about 55 GB of
+already-uploaded data at ~22 MB/s, uploading almost nothing for over an hour. For
+repeated runs, keep your own record of what's been uploaded and give the CLI only
+new files.
+
 ### Thumbnail generation blocks uploads
 
 The single biggest cause of bulk-upload failures. The CLI tries to generate a
