@@ -99,66 +99,83 @@ def walk(root, workers, log):
     stop = threading.Event()
     err = {"rate_limited": None, "count": 0}
 
-    def worker():
-        while not stop.is_set():
-            try:
-                path, prefix = pending.get(timeout=2)
-            except queue.Empty:
-                return
-            try:
-                entries = json.loads(run_cli(
-                    ["filesystem", "list", path, "--json"],
-                    timeout=300) or "[]")
-            except RateLimited as e:
-                with lock:
-                    err["rate_limited"] = str(e)
-                stop.set()
-                pending.task_done()
-                return
-            except Exception as e:
+    def list_folder(path, prefix):
+        try:
+            # Cold cache: the NAS decrypts ~800 names a minute, so a 7,000-file
+            # folder needs ~9 minutes once (warm, the same listing takes
+            # seconds). The timeout only guards against a hung CLI.
+            entries = json.loads(run_cli(
+                ["filesystem", "list", path, "--json"],
+                timeout=3600) or "[]")
+        except RateLimited as e:
+            with lock:
+                err["rate_limited"] = str(e)
+            stop.set()
+            return
+        except Exception as e:
+            with lock:
+                err["count"] += 1
+                log(f"ERROR listing {path}: {e}")
+            return
+
+        for e in entries:
+            nm = e.get("name") or {}
+            if not nm.get("ok"):
                 with lock:
                     err["count"] += 1
-                    log(f"ERROR listing {path}: {e}")
-                pending.task_done()
+                    log(f"SKIP undecryptable name, uid={e.get('uid')}")
                 continue
-
-            for e in entries:
-                nm = e.get("name") or {}
-                if not nm.get("ok"):
-                    with lock:
+            name = nm["value"]
+            child = f"{path}/{esc(name)}"
+            child_rel = f"{prefix}/{local_name(name)}".lstrip("/")
+            rev = e.get("activeRevision") or {}
+            if e.get("type") == "folder":
+                with lock:
+                    folders[child_rel] = True
+                pending.put((child, child_rel))
+            else:
+                with lock:
+                    # Two different remote names can sanitise to the same
+                    # local name. Whoever lands first wins; flag the clash
+                    # rather than silently overwriting one with the other.
+                    if child_rel in files:
                         err["count"] += 1
-                        log(f"SKIP undecryptable name, uid={e.get('uid')}")
-                    continue
-                name = nm["value"]
-                child = f"{path}/{esc(name)}"
-                child_rel = f"{prefix}/{local_name(name)}".lstrip("/")
-                rev = e.get("activeRevision") or {}
-                if e.get("type") == "folder":
-                    with lock:
-                        folders[child_rel] = True
-                    pending.put((child, child_rel))
-                else:
-                    with lock:
-                        # Two different remote names can sanitise to the same
-                        # local name. Whoever lands first wins; flag the clash
-                        # rather than silently overwriting one with the other.
-                        if child_rel in files:
-                            err["count"] += 1
-                            log(f"SKIP name collision after sanitising: "
-                                f"{child!r} and {files[child_rel]['remote']!r} "
-                                f"both map to {child_rel!r}")
-                            continue
-                        files[child_rel] = {
-                            "remote": child,
-                            "size": rev.get("claimedSize",
-                                            rev.get("storageSize")),
-                            "sha1": (rev.get("claimedDigests") or {}).get("sha1"),
-                        }
-            pending.task_done()
+                        log(f"SKIP name collision after sanitising: "
+                            f"{child!r} and {files[child_rel]['remote']!r} "
+                            f"both map to {child_rel!r}")
+                        continue
+                    files[child_rel] = {
+                        "remote": child,
+                        "size": rev.get("claimedSize",
+                                        rev.get("storageSize")),
+                        "sha1": (rev.get("claimedDigests") or {}).get("sha1"),
+                    }
+    def worker():
+        # Each worker runs until the whole walk is done, not until the queue is
+        # momentarily empty. A worker that quit on an empty queue (the old
+        # get(timeout=2) -> return) was lost for good, and since the first
+        # listing always takes longer than that, three of four workers quit at
+        # the start of every run and one walked the whole tree alone.
+        while True:
+            item = pending.get()
+            try:
+                if item is None:            # sentinel: walk finished
+                    return
+                if not stop.is_set():       # after a rate limit, just drain
+                    list_folder(*item)
+            except Exception as e:          # never let a worker die silently
+                with lock:
+                    err["count"] += 1
+                    log(f"ERROR walking {item[0]}: {e!r}")
+            finally:
+                pending.task_done()
 
     ts = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
     for t in ts:
         t.start()
+    pending.join()                  # every folder, including ones found mid-walk
+    for _ in ts:
+        pending.put(None)
     for t in ts:
         t.join()
 
