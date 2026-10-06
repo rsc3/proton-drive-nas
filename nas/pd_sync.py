@@ -56,6 +56,12 @@ class RateLimited(Exception):
     pass
 
 
+# What the CLI prints when the SDK gives up on HTTP 429 (RateLimitedError,
+# "Too many server requests, please try again later"), plus the API's code.
+RATE_LIMIT_RE = re.compile(
+    r"RateLimitedError|too many (server )?requests|Code\W{0,3}2011\b", re.I)
+
+
 def run_cli(args, attempts=5, timeout=1800):
     delay = 3.0
     last = ""
@@ -74,7 +80,10 @@ def run_cli(args, attempts=5, timeout=1800):
                 + (f" | stdout: {out}" if out else "")
                 + (" | (both streams empty -- likely killed by a signal)"
                    if not err and not out else ""))
-        if "2011" in last or "too many requests" in last.lower():
+        # Only stderr, and only the SDK's own wording. Searching everything for
+        # "2011" matched a file name (...v20110828...) in a listing's stdout and
+        # aborted a 5-hour walk as "rate limited".
+        if RATE_LIMIT_RE.search(err):
             raise RateLimited(last[:400])
         if n == attempts - 1:
             break
@@ -104,9 +113,17 @@ def walk(root, workers, log):
             # Cold cache: the NAS decrypts ~800 names a minute, so a 7,000-file
             # folder needs ~9 minutes once (warm, the same listing takes
             # seconds). The timeout only guards against a hung CLI.
-            entries = json.loads(run_cli(
-                ["filesystem", "list", path, "--json"],
-                timeout=3600) or "[]")
+            # The CLI occasionally exits 0 with its JSON cut short (seen 8 times
+            # on the NAS, never reproduced on the laptop). Re-list, up to 3 tries.
+            for attempt in range(3):
+                out = run_cli(["filesystem", "list", path, "--json"],
+                              timeout=3600) or "[]"
+                try:
+                    entries = json.loads(out)
+                    break
+                except json.JSONDecodeError:
+                    if attempt == 2:
+                        raise
         except RateLimited as e:
             with lock:
                 err["rate_limited"] = str(e)
@@ -211,7 +228,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="/my-files")
     ap.add_argument("--target", required=True)
-    ap.add_argument("--workers", type=int, default=4)
+    # 1 by default: CLI processes share one SQLite cache, and 4 of them logged
+    # 63 "database is locked" errors in two hours (docs/findings.md).
+    ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-delete", action="store_true")
     ap.add_argument("--trash-dir", default=None,

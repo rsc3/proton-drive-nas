@@ -253,6 +253,32 @@ first listings. Every run then failed on the same folders, never mirrored
 them, and skipped its delete pass. The limit is now 1 hour, which only guards
 against a hung CLI.
 
+### CLI processes can't share a cache in parallel
+
+Every CLI process opens the same SQLite cache in `$BASE/state`. That cache uses
+WAL mode with a 5-second busy timeout. When the mirror listed with 4 processes
+at once, the CLI logged 63 `database is locked` errors in two hours. Some
+listings then failed with `Node not found` for folders that exist. So the
+mirror lists one folder at a time (`WORKERS=1`).
+
+A separate cache per process is not a way around this either: each would need
+its own copy of the session, and copies break as soon as one refreshes its
+token.
+
+### Recognising a real rate limit
+
+When the SDK gives up on HTTP 429, the CLI prints `RateLimitedError: Too many
+server requests, please try again later` to stderr and exits 1. Before it gives
+up, the SDK retries by itself, honouring `retry-after`. `pd_sync.py` matches
+only that wording, or `Code=2011`, and only on stderr.
+
+It used to search everything, stdout included, for `2011`. That matched a file
+name (`…v20110828…`) in a listing and ended a 5-hour walk as "rate limited".
+
+The CLI also occasionally exits 0 with its JSON output cut short. This has
+happened 8 times on the NAS and never on the laptop. `pd_sync.py` re-lists up to
+3 times before counting it as an error.
+
 ### `upload -f skip` re-reads everything it skips
 
 With `-f skip`, the CLI doesn't trust names. It reads and hashes each local file

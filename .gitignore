@@ -9,3 +9,5 @@ proton-drive
 pd-build/
 release/
 node_modules/
+__pycache__/
+*.pyc

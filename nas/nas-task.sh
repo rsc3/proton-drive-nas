@@ -13,7 +13,7 @@ STAGE=/volume1/data/pd-staging        # network-writable staging directory
 DOCKER=/usr/local/bin/docker
 IMAGE=python:3-slim
 OWNER=1026:100                        # uid:gid owning your shares ("ls -n")
-WORKERS=4                             # parallel folder listings
+WORKERS=1                             # CLIs share one cache; >1 locks it
 EXPECT_SHA=                           # optional sha256 of your binary
 
 # Sections to sync: "<remote>:<subdir>[:no-delete]", space separated.
