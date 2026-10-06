@@ -240,6 +240,19 @@ itself reaches ~340 Mb/s up:
 So a tree with tens of thousands of small files is slow however fast the uplink
 is, and a faster plan wouldn't help. Large files are the fast path.
 
+### A folder's first listing is slow on the NAS
+
+`filesystem list` decrypts every entry's name. With an empty cache, the NAS
+(Celeron J4125, baseline build) manages about 800 names a minute per CLI
+process, so a 7,000-file folder takes about 9 minutes the first time. Once
+cached, the same listing takes seconds; the laptop lists 4,961 entries in
+1.5 s.
+
+`pd_sync.py` used to give each listing 300 s, which killed exactly these
+first listings. Every run then failed on the same folders, never mirrored
+them, and skipped its delete pass. The limit is now 1 hour, which only guards
+against a hung CLI.
+
 ### `upload -f skip` re-reads everything it skips
 
 With `-f skip`, the CLI doesn't trust names. It reads and hashes each local file
