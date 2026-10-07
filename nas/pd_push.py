@@ -85,7 +85,7 @@ def lt_name(s):
     return "".join(c for c in s if ord(c) not in BIDI)
 
 
-def unfinished_files(qbt_dir, mapping, log):
+def unfinished_files(qbt_dir, mapping, log, src="/"):
     """Absolute local paths of every file belonging to a torrent qBittorrent
     hasn't finished. mapping: container save path prefix -> local prefix."""
     out, n_tor, n_unf = set(), 0, 0
@@ -109,8 +109,9 @@ def unfinished_files(qbt_dir, mapping, log):
             if sp == pre or sp.startswith(pre + "/"):
                 local = loc + sp[len(pre):]
                 break
-        if local is None:
-            continue
+        src_dir = os.path.normpath(src)
+        if local is None or not (os.path.normpath(local) + "/").startswith(src_dir.rstrip("/") + "/"):
+            continue                      # saves somewhere outside this source
         pieces = fr.get(b"pieces", b"")
         if pieces and all(x & 1 for x in pieces):
             continue                      # complete
@@ -361,7 +362,7 @@ class Push:
         if not os.path.isdir(a.src) or not os.listdir(a.src):
             self.log(f"FATAL source missing or empty: {a.src} -- nothing done")
             return 1
-        unfinished = unfinished_files(a.qbt, a.qbt_map, self.log)
+        unfinished = unfinished_files(a.qbt, a.qbt_map, self.log, a.src)
         local, walk_errors = self.scan_local(unfinished)
         for e in walk_errors[:20]:
             self.log(f"ERROR reading local tree: {e}")

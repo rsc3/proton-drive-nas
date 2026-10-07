@@ -2,8 +2,9 @@
 # Run by DSM Task Scheduler via bootstrap.sh, as root. Two modes:
 #
 #   nas-task.sh                 Proton -> NAS mirror (nightly)
-#   nas-task.sh push [--dry-run] [--allow-mass-delete]
-#                               NAS -> Proton backup of PUSH_JOBS (weekly)
+#   nas-task.sh push [NAME...] [--dry-run] [--allow-mass-delete]
+#                               NAS -> Proton backup of PUSH_JOBS (weekly);
+#                               NAMEs (e.g. "music") limit it to those jobs
 #
 # The modes have separate locks, logs, run markers and Proton sessions, so a
 # multi-day backup never blocks the nightly mirror.
@@ -53,9 +54,17 @@ PUSH_ARGS=""
 # No `shift`: the script re-execs itself below with the original "$@".
 if [ "${1:-}" = "push" ]; then
     MODE=push
+    ONLY=""
     for a in "$@"; do
-        case $a in --*) PUSH_ARGS="$PUSH_ARGS $a" ;; esac
+        case $a in push) ;; --*) PUSH_ARGS="$PUSH_ARGS $a" ;; *) ONLY="$ONLY $a" ;; esac
     done
+    if [ -n "$ONLY" ]; then            # keep only the named jobs (by folder name)
+        keep=""
+        for job in $PUSH_JOBS; do
+            for o in $ONLY; do [ "$(basename "${job%%:*}")" = "$o" ] && keep="$keep $job"; done
+        done
+        PUSH_JOBS=$keep
+    fi
 elif [ $# -gt 0 ]; then
     SECTIONS="$*"
 fi

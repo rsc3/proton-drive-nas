@@ -259,8 +259,11 @@ itself.
 **2. Dry run.** `nas-task.sh push --dry-run` lists, per job, what would be
 uploaded and what is left out, and why. Nothing is changed.
 
-**3. First real runs, by hand.** `nas-task.sh push`. Large first uploads take
-days: Proton accepts about 46 Mb/s per file. A run that stops (a reboot, a rate
+**3. First real runs, by hand,** one share at a time: `nas-task.sh push music`,
+then `nas-task.sh push video`. A name limits the run to the job whose folder has
+that name. Large first uploads take days: Proton accepts about 46 Mb/s per file.
+To start one from SSH without keeping the session open:
+`sudo sh -c 'nohup /bin/sh /volume1/<staging>/pd-staging/nas-task.sh push music >/dev/null 2>&1 &'`. A run that stops (a reboot, a rate
 limit) resumes from its manifest (`state-push/manifest-<name>.json`).
 
 **4. Then schedule it,** for example weekly:
