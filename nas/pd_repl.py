@@ -26,6 +26,16 @@ RATE_LIMIT_RE = re.compile(
     r"RateLimitedError|too many (server )?requests|Code\W{0,3}2011\b", re.I)
 
 
+def _now():
+    """A clock that keeps running while the machine is suspended (monotonic
+    doesn't), so a command left in flight across a laptop sleep times out
+    on wake instead of minutes later."""
+    try:
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    except (AttributeError, OSError):
+        return time.monotonic()
+
+
 class CliError(Exception):
     pass
 
@@ -56,6 +66,7 @@ class Repl:
         self.err = []
         self.err_lock = threading.Lock()
         self.restarts = 0
+        self._started = False
         self._last = 0
 
     # -- process ---------------------------------------------------------------
@@ -100,9 +111,9 @@ class Repl:
     def _read_until_prompt(self, timeout):
         fd = self.p.stdout.fileno()
         buf = bytearray()
-        deadline = time.monotonic() + timeout
+        deadline = _now() + timeout
         while not buf.endswith(PROMPT):
-            left = deadline - time.monotonic()
+            left = deadline - _now()
             if left <= 0:
                 self._kill()
                 raise CliError(f"timed out after {timeout}s")
@@ -122,8 +133,9 @@ class Repl:
     def cmd(self, *args, timeout=3600):
         """Run one command; return (stdout, stderr). Restarts a dead CLI."""
         if self.p is None or self.p.poll() is not None:
-            if self.p is not None:
+            if self._started:
                 self.restarts += 1
+            self._started = True
             self._start()
         line = " ".join(quote(a) for a in args).encode() + b"\n"
         with self.err_lock:
