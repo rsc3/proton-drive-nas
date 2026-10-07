@@ -114,7 +114,10 @@ trap 'tail -c 400000 "$LOG" > "$LOGCOPY" 2>/dev/null; \
       chmod 0666 "$LOGCOPY" 2>/dev/null; \
       cp "$STATE/proton-drive.log" "$CLICOPY" 2>/dev/null; \
       chmod 0666 "$CLICOPY" 2>/dev/null; \
-      rm -f "$MARK"' EXIT INT TERM
+      rm -f "$MARK"' EXIT
+# A signal must end the run. A handler that only cleans up lets sh carry on with
+# the next section after a kill, still holding the lock (it did).
+trap 'echo "stopped by signal"; exit 143' INT TERM
 
 # DSM shows no "currently running" state, so publish one.
 date '+%Y-%m-%d %H:%M:%S started' > "$MARK" 2>/dev/null
