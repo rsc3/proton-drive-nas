@@ -11,24 +11,19 @@ import argparse
 import hashlib
 import json
 import os
-import queue
 import re
 import shutil
-import subprocess
 import sys
-import threading
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pd_repl import Repl, CliError, RateLimited, esc  # noqa: E402
 
 CLI = os.environ.get("PROTON_DRIVE_BIN", "proton-drive")
 
 # Artifacts the NAS itself creates inside the share. Never download, never
 # delete -- DSM recreates @eaDir constantly and fighting it is pointless.
 LOCAL_KEEP = {"@eaDir", "#recycle", ".DS_Store", "@tmp", ".trash"}
-
-
-def esc(name):
-    """Proton path syntax: literal / in a name is backslash-escaped."""
-    return name.replace("\\", "\\\\").replace("/", "\\/")
 
 
 # The CLI rewrites unsafe characters when it writes a file to disk, so the local
@@ -52,153 +47,81 @@ def local_name(name):
     return z
 
 
-class RateLimited(Exception):
-    pass
-
-
-# What the CLI prints when the SDK gives up on HTTP 429 (RateLimitedError,
-# "Too many server requests, please try again later"), plus the API's code.
-RATE_LIMIT_RE = re.compile(
-    r"RateLimitedError|too many (server )?requests|Code\W{0,3}2011\b", re.I)
-
-
-def run_cli(args, attempts=5, timeout=1800):
-    delay = 3.0
-    last = ""
-    for n in range(attempts):
-        p = subprocess.run([CLI, *args], capture_output=True, text=True,
-                           timeout=timeout)
-        if p.returncode == 0:
-            return p.stdout
-        # Keep BOTH streams and the return code. Truncating this to 300 chars
-        # from the front hid the real message behind a banner of '=' characters
-        # for several debugging rounds -- never do that again.
-        err = (p.stderr or "").strip()
-        out = (p.stdout or "").strip()
-        last = (f"rc={p.returncode}"
-                + (f" | stderr: {err}" if err else "")
-                + (f" | stdout: {out}" if out else "")
-                + (" | (both streams empty -- likely killed by a signal)"
-                   if not err and not out else ""))
-        # Only stderr, and only the SDK's own wording. Searching everything for
-        # "2011" matched a file name (...v20110828...) in a listing's stdout and
-        # aborted a 5-hour walk as "rate limited".
-        if RATE_LIMIT_RE.search(err):
-            raise RateLimited(last[:400])
-        if n == attempts - 1:
-            break
-        time.sleep(delay)
-        delay *= 2
-    raise RuntimeError(f"{' '.join(args)}: {last[:4000]}")
-
-
-def walk(root, workers, log):
-    """Return (files, folders) keyed by LOCAL path relative to the target.
+def walk(root, cli, log, exclude=()):
+    """Return (files, folders, errors) keyed by LOCAL path relative to the target.
 
     Local keys are sanitised the same way the CLI sanitises names on download
     (see local_name). Remote paths keep the true names. Getting this wrong means
     the expected local file never exists, so it is re-downloaded every run -- and
     on a mirrored section the sanitised file is then deleted as "extraneous",
     producing infinite delete/download churn.
+
+    One interactive CLI, one folder at a time: CLI processes can't share a
+    cache, and a warm REPL lists a folder in ~50 ms, so parallelism isn't needed.
+    `exclude` names top-level folders under root that are not mirrored at all.
+
+    Folders are addressed by name, which the CLI resolves from its cache. A
+    name the REPL can't take (it reads one command per line, so a newline) is
+    addressed by node uid instead (`/my-files/<uid>`). Uids everywhere would
+    work too but walk ~6x slower: the CLI looks each one up separately.
+    Under /shared-with-me the share itself must always be named.
     """
-    files, folders = {}, {}
-    pending = queue.Queue()          # (remote path, local rel prefix)
-    pending.put((root, ""))
-    lock = threading.Lock()
-    stop = threading.Event()
-    err = {"rate_limited": None, "count": 0}
-
-    def list_folder(path, prefix):
+    files, folders, errors = {}, {}, 0
+    pending = [(root, root, "")]        # (cli path, readable path, local prefix)
+    while pending:
+        path, shown, prefix = pending.pop()
         try:
-            # Cold cache: the NAS decrypts ~800 names a minute, so a 7,000-file
-            # folder needs ~9 minutes once (warm, the same listing takes
-            # seconds). The timeout only guards against a hung CLI.
-            # The CLI occasionally exits 0 with its JSON cut short (seen 8 times
-            # on the NAS, never reproduced on the laptop). Re-list, up to 3 tries.
-            for attempt in range(3):
-                out = run_cli(["filesystem", "list", path, "--json"],
-                              timeout=3600) or "[]"
-                try:
-                    entries = json.loads(out)
-                    break
-                except json.JSONDecodeError:
-                    if attempt == 2:
-                        raise
-        except RateLimited as e:
-            with lock:
-                err["rate_limited"] = str(e)
-            stop.set()
-            return
-        except Exception as e:
-            with lock:
-                err["count"] += 1
-                log(f"ERROR listing {path}: {e}")
-            return
-
+            entries = cli.list(path)
+        except RateLimited:
+            raise
+        except CliError as e:
+            errors += 1
+            log(f"ERROR listing {shown}: {e}")
+            continue
+        parts = path.strip("/").split("/")
+        if parts[0] == "shared-with-me":
+            base = "/shared-with-me" if len(parts) == 1 else f"/shared-with-me/{parts[1]}"
+        else:
+            base = "/" + parts[0]
         for e in entries:
             nm = e.get("name") or {}
             if not nm.get("ok"):
-                with lock:
-                    err["count"] += 1
-                    log(f"SKIP undecryptable name, uid={e.get('uid')}")
+                errors += 1
+                log(f"SKIP undecryptable name, uid={e.get('uid')}")
                 continue
             name = nm["value"]
-            child = f"{path}/{esc(name)}"
+            if not prefix and name in exclude:
+                continue
+            typable = "\n" not in name and "\r" not in name
+            if typable:
+                child = f"{path}/{esc(name)}"
+            elif base == "/shared-with-me":     # a share's root: by name only
+                errors += 1
+                log(f"SKIP share with a newline in its name: {name!r}")
+                continue
+            else:
+                child = f"{base}/{e['uid']}"
+            child_shown = f"{shown}/{esc(name)}"
             child_rel = f"{prefix}/{local_name(name)}".lstrip("/")
             rev = e.get("activeRevision") or {}
             if e.get("type") == "folder":
-                with lock:
-                    folders[child_rel] = True
-                pending.put((child, child_rel))
+                folders[child_rel] = True
+                pending.append((child, child_shown, child_rel))
+            elif child_rel in files:
+                # Two different remote names can sanitise to the same local
+                # name. Whoever lands first wins; flag the clash rather than
+                # silently overwriting one with the other.
+                errors += 1
+                log(f"SKIP name collision after sanitising: {child_shown!r} and "
+                    f"{files[child_rel]['shown']!r} both map to {child_rel!r}")
             else:
-                with lock:
-                    # Two different remote names can sanitise to the same
-                    # local name. Whoever lands first wins; flag the clash
-                    # rather than silently overwriting one with the other.
-                    if child_rel in files:
-                        err["count"] += 1
-                        log(f"SKIP name collision after sanitising: "
-                            f"{child!r} and {files[child_rel]['remote']!r} "
-                            f"both map to {child_rel!r}")
-                        continue
-                    files[child_rel] = {
-                        "remote": child,
-                        "size": rev.get("claimedSize",
-                                        rev.get("storageSize")),
-                        "sha1": (rev.get("claimedDigests") or {}).get("sha1"),
-                    }
-    def worker():
-        # Each worker runs until the whole walk is done, not until the queue is
-        # momentarily empty. A worker that quit on an empty queue (the old
-        # get(timeout=2) -> return) was lost for good, and since the first
-        # listing always takes longer than that, three of four workers quit at
-        # the start of every run and one walked the whole tree alone.
-        while True:
-            item = pending.get()
-            try:
-                if item is None:            # sentinel: walk finished
-                    return
-                if not stop.is_set():       # after a rate limit, just drain
-                    list_folder(*item)
-            except Exception as e:          # never let a worker die silently
-                with lock:
-                    err["count"] += 1
-                    log(f"ERROR walking {item[0]}: {e!r}")
-            finally:
-                pending.task_done()
-
-    ts = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
-    for t in ts:
-        t.start()
-    pending.join()                  # every folder, including ones found mid-walk
-    for _ in ts:
-        pending.put(None)
-    for t in ts:
-        t.join()
-
-    if err["rate_limited"]:
-        raise RateLimited(err["rate_limited"])
-    return files, folders, err["count"]
+                files[child_rel] = {
+                    "remote": child,
+                    "shown": child_shown,
+                    "size": rev.get("claimedSize", rev.get("storageSize")),
+                    "sha1": (rev.get("claimedDigests") or {}).get("sha1"),
+                }
+    return files, folders, errors
 
 
 def sha1_of(path, buf=1 << 20):
@@ -209,14 +132,24 @@ def sha1_of(path, buf=1 << 20):
     return h.hexdigest()
 
 
-def needs_download(local, meta, log):
+def needs_download(local, meta, log, cache=None):
+    """cache: rel-path -> [size, mtime_ns, sha1] from earlier runs, so an
+    unchanged local file isn't re-read every night just to re-hash it."""
     if not os.path.exists(local):
         return True
     try:
-        if meta["size"] is not None and os.path.getsize(local) != meta["size"]:
+        st = os.stat(local)
+        if meta["size"] is not None and st.st_size != meta["size"]:
             return True
         if meta["sha1"]:
-            return sha1_of(local) != meta["sha1"].lower()
+            hit = cache.get(local) if cache is not None else None
+            if hit and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+                digest = hit[2]
+            else:
+                digest = sha1_of(local)
+                if cache is not None:
+                    cache[local] = [st.st_size, st.st_mtime_ns, digest]
+            return digest != meta["sha1"].lower()
         # No remote hash and size matches: assume unchanged.
         return False
     except OSError as e:
@@ -228,9 +161,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="/my-files")
     ap.add_argument("--target", required=True)
-    # 1 by default: CLI processes share one SQLite cache, and 4 of them logged
-    # 63 "database is locked" errors in two hours (docs/findings.md).
-    ap.add_argument("--workers", type=int, default=1)
+    # Accepted for old callers and ignored: the walk uses one interactive CLI.
+    ap.add_argument("--workers", type=int, default=1, help=argparse.SUPPRESS)
+    ap.add_argument("--exclude", action="append", default=[],
+                    help="top-level folder under --root to leave out entirely "
+                         "(never downloaded, never deleted locally)")
+    ap.add_argument("--hash-cache",
+                    help="JSON file remembering local sha1s by size+mtime")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-delete", action="store_true")
     ap.add_argument("--trash-dir", default=None,
@@ -263,9 +200,17 @@ def main():
         log(f"FATAL target does not exist: {args.target}")
         return 1
 
+    cli = Repl(os.environ.get("PROTON_DRIVE_BIN", "proton-drive"))
+    try:
+        return run(args, cli, log, tag)
+    finally:
+        cli.close()
+
+
+def run(args, cli, log, tag):
     t0 = time.time()
     try:
-        files, folders, walk_errors = walk(args.root, args.workers, log)
+        files, folders, walk_errors = walk(args.root, cli, log, set(args.exclude))
     except RateLimited as e:
         log(f"RATE LIMITED during walk: {e}")
         return 2
@@ -285,13 +230,19 @@ def main():
                 os.makedirs(d, exist_ok=True)
 
     # Decide what to fetch, then fetch in batches grouped by target directory.
-    # `filesystem download` takes `path... localFolder`, and process startup
-    # (a ~112MB Bun binary) dominates per-file cost, so batching is a large win:
-    # measured 8.1s/file one-at-a-time.
+    # `filesystem download` takes `path... localFolder`. Batching mattered most
+    # when every command started a new CLI (8.1 s/file one at a time); with the
+    # interactive CLI it still saves a round trip per file.
+    cache = {}
+    if args.hash_cache:
+        try:
+            cache = json.load(open(args.hash_cache))
+        except (OSError, ValueError):
+            cache = {}
     todo = {}  # local parent dir -> [(rel, meta)]
     for rel, meta in sorted(files.items()):
         local = os.path.join(args.target, rel)
-        if not needs_download(local, meta, log):
+        if not needs_download(local, meta, log, cache):
             stats["unchanged"] += 1
             continue
         log(f"GET  {rel} ({(meta['size'] or 0)/1e6:.1f} MB)")
@@ -305,8 +256,8 @@ def main():
         """Download items into parent. Returns list of (rel, error) failures."""
         paths = [m["remote"] for _, m in items]
         try:
-            run_cli(["filesystem", "download", "-f", "replace", "-d", "merge",
-                     *paths, parent])
+            cli.cmd("filesystem", "download", "-f", "replace", "-d", "merge",
+                    *paths, parent, timeout=4 * 3600)
             return []
         except RateLimited:
             raise
@@ -381,8 +332,11 @@ def main():
 
         # NB: pruning via dirnames only works with topdown=True, so protected
         # paths are filtered by component instead.
+        excluded = {local_name(x) for x in args.exclude}
+
         def protected(rel_path):
-            return bool(set(rel_path.split(os.sep)) & LOCAL_KEEP)
+            parts = rel_path.split(os.sep)
+            return bool(set(parts) & LOCAL_KEEP) or parts[0] in excluded
 
         for dirpath, dirnames, filenames in os.walk(args.target, topdown=False):
             for fn in filenames:
@@ -424,6 +378,16 @@ def main():
                         shutil.rmtree(dirpath, ignore_errors=True)
                     stats["deleted"] += 1
 
+    if args.hash_cache and not args.dry_run:
+        live = {os.path.join(args.target, r) for r in files}
+        try:
+            tmp = args.hash_cache + ".tmp"
+            json.dump({k: v for k, v in cache.items() if k in live}, open(tmp, "w"))
+            os.replace(tmp, args.hash_cache)
+        except OSError as e:
+            log(f"WARN cannot write hash cache: {e}")
+    if cli.restarts:
+        log(f"note: the CLI restarted {cli.restarts} time(s) during this run")
     log(f"=== done{tag} in {time.time()-t0:.1f}s: "
         f"downloaded={stats['downloaded']} ({stats['bytes']/1e9:.2f} GB) "
         f"unchanged={stats['unchanged']} deleted={stats['deleted']} "

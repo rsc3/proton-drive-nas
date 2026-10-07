@@ -258,8 +258,9 @@ against a hung CLI.
 Every CLI process opens the same SQLite cache in `$BASE/state`. That cache uses
 WAL mode with a 5-second busy timeout. When the mirror listed with 4 processes
 at once, the CLI logged 63 `database is locked` errors in two hours. Some
-listings then failed with `Node not found` for folders that exist. So the
-mirror lists one folder at a time (`WORKERS=1`).
+listings then failed with `Node not found` for folders that exist. So each
+engine runs exactly one CLI process (see the interactive mode, below), and the
+mirror and the backup use separate sessions and cache directories.
 
 A separate cache per process is not a way around this either: each would need
 its own copy of the session, and copies break as soon as one refreshes its
@@ -278,6 +279,77 @@ name (`…v20110828…`) in a listing and ended a 5-hour walk as "rate limited".
 The CLI also occasionally exits 0 with its JSON output cut short. This has
 happened 8 times on the NAS and never on the laptop. `pd_sync.py` re-lists up to
 3 times before counting it as an error.
+
+### The CLI has an interactive mode, and it's ~30× faster
+
+Started with no arguments, `proton-drive` reads one command per line from stdin
+and prints `proton-drive> ` when each one is done. Session and cache stay warm
+between commands. Driven that way (`nas/pd_repl.py`):
+
+- a listing takes ~50 ms, against ~1.5 s for a fresh CLI on the laptop and
+  several seconds on the NAS;
+- the whole drive (82,500 files, 7,300 folders) walks in about a minute on the
+  laptop. The NAS's old one-process-per-folder walk took 8.2 hours.
+
+Details that matter when you drive it from a program:
+
+- **There's no exit code.** Judge each command by its result: a listing parses
+  as JSON, and an upload appears in a listing afterwards. Recoverable errors are
+  printed to stderr and the prompt comes back. Anything else ends the process,
+  so restart it.
+- **stderr is a separate pipe and can trail the prompt.** Don't wait for it
+  after every command: 50 ms each added 6 minutes to a full walk. Only wait when
+  a command looks failed.
+- **Quoting is POSIX-like.** Use double quotes, with `\"` and `\\` escapes.
+  A newline can't be passed at all.
+- **No progress bars.** Upload and download draw them only on a terminal.
+
+### Address nodes by uid when a name can't be typed
+
+Path segments may be node uids: `/my-files/<uid>` reaches any node in My Files
+directly, and so does `/my-files/<any path>/<uid>`. Under `/shared-with-me`, the
+share itself must be given by name, then uids below it. Uids are the way to
+reach a name containing a newline; there was one, since removed. They're also
+the way to act on one exact file.
+
+Walking entirely by uid works, but it's about 6× slower than by name, because
+the CLI resolves each uid separately rather than from its folder cache. Use
+names, and fall back to uids.
+
+### Trash is looked up by name, first match wins
+
+`filesystem delete` works only on trashed items, given as `/trash/<name>`, and
+it takes the **first** trashed item with that name. With a common name, such as
+`cover.jpg`, that may be someone else's file. To permanently delete one exact
+file:
+
+1. rename it, by uid, to a unique name;
+2. trash it;
+3. delete `/trash/<unique name>`.
+
+`pd_push.py` does this whenever it replaces a changed file.
+
+### An upload hangs if the file grows during it
+
+Append to a file while the CLI uploads it, and the upload never finishes; it
+doesn't fail either. `pd_push.py` gives every upload command a timeout, at least
+30 minutes. It also stats each file before and after uploading, and leaves out
+any file that changed.
+
+### An interrupted upload leaves nothing behind
+
+Kill the CLI 25 s into a 300 MB upload, and nothing appears in the folder: no
+partial file, no `(1)`. The next upload of the same file lands exactly once, at
+full size. This was the open question for a duplicate-free backup design. It's
+covered by the `pd_push.py` test suite.
+
+### qBittorrent writes unfinished downloads under their final names
+
+With the default settings (no `.!qB` extension, no incomplete folder), a torrent
+that's 1% done is a full-size, mostly empty sparse file with its real name. Some
+had sat like that for over a year. A backup can't tell them apart by name or
+age. `pd_push.py` reads qBittorrent's resume data (`BT_backup/*.fastresume`) for
+completion, and also leaves out any sparse file.
 
 ### `upload -f skip` re-reads everything it skips
 

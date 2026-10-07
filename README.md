@@ -42,7 +42,9 @@ evidence — worth reading before you try to "simplify" any of this.
 | Path | What it is |
 | --- | --- |
 | [`bin/pd`](bin/pd) | Wrapper around the official CLI for day-to-day file management |
-| [`nas/pd_sync.py`](nas/pd_sync.py) | The mirror engine. Walks Proton, diffs by sha1, downloads changes, trashes removals |
+| [`nas/pd_sync.py`](nas/pd_sync.py) | The mirror engine (Proton → NAS). Walks Proton, diffs by sha1, downloads changes, trashes removals |
+| [`nas/pd_push.py`](nas/pd_push.py) | The backup engine (NAS → Proton). Uploads new files, replaces changed ones, trashes deletions; never makes duplicates |
+| [`nas/pd_repl.py`](nas/pd_repl.py) | Drives the CLI's interactive mode; both engines use it |
 | [`nas/nas-task.sh`](nas/nas-task.sh) | What DSM Task Scheduler actually runs |
 | [`nas/bootstrap.sh`](nas/bootstrap.sh) | The few lines you paste into DSM, once |
 | [`nas/qbt-on-complete.sh`](nas/qbt-on-complete.sh) | Optional qBittorrent completion hook that uploads finished torrents to Proton; setup is in its header |
@@ -62,14 +64,18 @@ Consequences:
 
 - A re-run with nothing changed transfers nothing.
 - Verification is real: a file is "unchanged" only if its bytes hash correctly.
-- Every run reads local files to hash them, so runtime scales with data size.
+- Local hashes are cached by size + modification time, so a file is read again
+  only when it has changed on disk.
 
 ## Design decisions worth knowing
 
-**Downloads are batched.** Process startup dominates cost — a ~112 MB Bun binary
-per invocation. Measured: **8.1 s/file** one-at-a-time versus **0.82 s/file** in
-batches of 25. A failed batch retries its members individually to isolate the bad
-file.
+**One CLI process per run, driven interactively.** Started with no arguments,
+the CLI takes one command per line and keeps its session and cache warm. Starting
+a ~112 MB Bun binary per command cost seconds each time: 8.1 s per file for
+one-at-a-time downloads, and an 8-hour nightly walk on the NAS. Through
+[`pd_repl.py`](nas/pd_repl.py), a listing takes ~50 ms, and the whole drive
+(7,300 folders) walks in about a minute on a laptop. Never run two CLI
+processes on one cache directory: they lock each other out.
 
 **Deletions go to trash, not oblivion.** Files removed upstream move to
 `<target>/.trash/<date>/<original path>`. An accidental delete or botched
@@ -86,9 +92,17 @@ sharing one directory would each delete the other's files as "extraneous".
 **The delete pass is skipped if the walk had any errors.** A partial listing must
 never be mistaken for mass deletion.
 
-**Walk cost is folder count, not bytes.** One `filesystem list` call per folder —
-the CLI has no recursion flag. A 2-folder tree walks in ~20 s; a 251-folder tree
-takes ~18 minutes regardless of size. Put big shared trees on their own schedule.
+**Walk cost is folder count, not bytes.** One `filesystem list` per folder, since
+the CLI has no recursion flag. With a warm cache, that's ~50 ms each. The first
+listing of a big folder is slow on a NAS CPU, because every name is decrypted
+once (see findings).
+
+**Backups never make duplicates.** `pd_push.py` never lets the CLI resolve a
+name clash (no `replace`, no `keep-both`). It adopts an existing remote file
+only on a matching sha1, and replaces a changed file by deleting the old copy
+first. It leaves out files that are still changing: anything recently modified,
+files of torrents qBittorrent hasn't finished, and sparse half-downloaded files.
+Setup: [docs/setup.md](docs/setup.md#9-optional-back-up-nas-folders-to-proton).
 
 ## Security
 
