@@ -52,6 +52,21 @@ def quote(arg):
     return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+_GLOB_TRIGGER = re.compile(r"[*?\[{]")
+_GLOB_SPECIAL = re.compile(r"([*?\[\]{}\\])")
+
+
+def local_arg(path):
+    """A local path as the CLI must be given it. The CLI glob-expands any local
+    path containing * ? [ or { (upload sources and download destinations), so
+    a real folder like "Album [FLAC]" matches nothing and the whole command
+    fails with "No paths matched". Backslash-escape the specials in that case;
+    without a trigger character the path is taken literally, so leave it."""
+    if _GLOB_TRIGGER.search(path):
+        return _GLOB_SPECIAL.sub(r"\\\1", path)
+    return path
+
+
 def esc(name):
     """Proton path syntax: a literal / in a name is backslash-escaped."""
     return name.replace("\\", "\\\\").replace("/", "\\/")

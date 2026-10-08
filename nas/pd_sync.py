@@ -17,7 +17,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pd_repl import Repl, CliError, RateLimited, esc  # noqa: E402
+from pd_repl import Repl, CliError, RateLimited, esc, local_arg  # noqa: E402
 
 CLI = os.environ.get("PROTON_DRIVE_BIN", "proton-drive")
 
@@ -252,25 +252,39 @@ def run(args, cli, log, tag):
         todo.setdefault(os.path.dirname(local) or args.target, []).append(
             (rel, meta))
 
+    def landed(rel, meta):
+        lp = os.path.join(args.target, rel)
+        return os.path.exists(lp) and (meta["size"] is None
+                                       or os.path.getsize(lp) == meta["size"])
+
     def fetch(parent, items):
         """Download items into parent. Returns list of (rel, error) failures."""
         paths = [m["remote"] for _, m in items]
+        said = ""
         try:
-            cli.cmd("filesystem", "download", "-f", "replace", "-d", "merge",
-                    *paths, parent, timeout=4 * 3600)
-            return []
+            out, err = cli.cmd("filesystem", "download", "-f", "replace", "-d",
+                               "merge", *paths, local_arg(parent),
+                               timeout=4 * 3600)
+            said = (out + err).strip()
         except RateLimited:
             raise
         except Exception as e:
-            if len(items) == 1:
-                return [(items[0][0], str(e))]
-            # Isolate the culprit rather than failing the whole batch.
-            log(f"WARN batch of {len(items)} failed ({str(e)[:120]}); "
-                f"retrying individually")
-            failures = []
-            for one in items:
-                failures.extend(fetch(parent, [one]))
-            return failures
+            said = str(e)
+        # The interactive CLI reports a failed command in its output, not by
+        # raising, and one bad file can fail a whole batch. Retry whatever
+        # didn't land one at a time, so it costs only itself.
+        missing = [it for it in items if not landed(*it)]
+        if not missing:
+            return []
+        if len(items) == 1:
+            return [(items[0][0], (said + cli.late_stderr()).strip()[-300:]
+                     or "nothing written")]
+        log(f"WARN {len(missing)} of {len(items)} in a batch didn't land; "
+            f"retrying them one at a time")
+        failures = []
+        for one in missing:
+            failures.extend(fetch(parent, [one]))
+        return failures
 
     BATCH = 25
     for parent in sorted(todo):

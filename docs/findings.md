@@ -329,6 +329,27 @@ file:
 
 `pd_push.py` does this whenever it replaces a changed file.
 
+### Local paths are wildcard patterns if they contain `* ? [ {`
+
+The CLI glob-expands any local path containing `*`, `?`, `[` or `{`, for both
+upload sources and download destinations. So a real folder like
+`Album [FLAC]` or `Nevermind {Deluxe}` matches nothing. The command fails with
+`No paths matched`, and for an upload batch that means none of it uploads.
+The first music backup lost 989 of 1,586 files to this. Every one of them had
+a bracket or brace in its path.
+
+Escape `* ? [ ] { } \` with a backslash, but only when the path contains a
+trigger character; without one, the path is taken literally.
+`pd_repl.local_arg()` does this for both engines, and `pd` does it for paths
+that exist.
+
+### The CLI can't download a name containing a backslash
+
+A file named `back\slash.flac` uploads fine, but `filesystem download` writes
+nothing for it. Run in a batch through the interactive CLI, that one file used
+to fail all 25 files. `pd_sync.py` now retries whatever a batch didn't deliver
+one at a time, so only the file itself fails.
+
 ### An upload hangs if the file grows during it
 
 Append to a file while the CLI uploads it, and the upload never finishes; it

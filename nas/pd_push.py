@@ -32,7 +32,7 @@ import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pd_repl import Repl, CliError, RateLimited, esc  # noqa: E402
+from pd_repl import Repl, CliError, RateLimited, esc, local_arg  # noqa: E402
 
 SKIP_DIRS = {"@eaDir", "#recycle", "@tmp", ".AppleDouble"}
 SKIP_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
@@ -302,14 +302,18 @@ class Push:
             pre.append((key, full, size, mtime, sha1_of(full)))
         total = sum(x[2] for x in pre)
         before = {k: e["uid"] for k, e in self.remote_entries(folder_path).items()}
+        said = ""
         try:
-            self.cli.cmd("filesystem", "upload", "-t", "-f", "skip", "-d", "merge",
-                         *[x[1] for x in pre], folder_path,
-                         timeout=max(1800, int(total / 1.5e6) + 900))
+            out, err = self.cli.cmd("filesystem", "upload", "-t", "-f", "skip", "-d", "merge",
+                                    *[local_arg(x[1]) for x in pre], folder_path,
+                                    timeout=max(1800, int(total / 1.5e6) + 900))
+            said = (out + err).strip()
         except RateLimited:
             raise
         except CliError as e:
-            self.log(f"WARN upload command failed ({str(e)[:200]}); checking what landed")
+            said = str(e)
+            self.log(f"WARN upload command failed ({said[:200]}); checking what landed")
+        reported = False
         entries = self.remote_entries(folder_path)
         expected = set(known)
         for key, full, size, mtime, digest in pre:
@@ -343,6 +347,10 @@ class Push:
                     continue
                 self.stats["errors"] += 1
                 self.log(f"ERROR upload not confirmed: {key}")
+                if not reported:          # once per batch: what the CLI said
+                    reported = True
+                    self.log("  the upload command said: "
+                             + (said + self.cli.late_stderr()).strip().replace("\n", " | ")[-600:])
                 continue
             expected.add(name)
             self.manifest[key] = [size, mtime, digest, e["uid"]]

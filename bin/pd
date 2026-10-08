@@ -10,6 +10,16 @@ import subprocess
 import sys
 
 CLI = os.path.expanduser("~/.local/bin/proton-drive")
+
+
+def local_arg(path):
+    """The CLI glob-expands local paths containing * ? [ or {, so a real folder
+    like "Album [FLAC]" matches nothing and the command fails with "No paths
+    matched". Escape the specials, but only for paths that exist, so a quoted
+    pattern like '*.mp4' still works. (Same rule as nas/pd_repl.py.)"""
+    if re.search(r"[*?\[{]", path) and os.path.exists(path):
+        return re.sub(r"([*?\[\]{}\\])", r"\\\1", path)
+    return path
 ROOT = "/my-files"
 
 USAGE = """pd - manage Proton Drive (source of truth; the NAS mirror follows)
@@ -183,7 +193,7 @@ def verify_path(local, remote, deep=False, fix=False):
             # is the only check that proves a real round trip.
             with tempfile.TemporaryDirectory() as td:
                 run("filesystem", "download", "-f", "replace",
-                    r["path"], td, capture=True)
+                    r["path"], local_arg(td), capture=True)
                 got = os.path.join(td, os.path.basename(rel))
                 if not os.path.exists(got) or sha1_file(got) != lsha:
                     print(f"  ROUNDTRIP {rel}")
@@ -230,7 +240,7 @@ def verify_path(local, remote, deep=False, fix=False):
             # bytes there.
             strat = "replace" if needs_replace else "skip"
             r2 = subprocess.run([CLI, "filesystem", "upload", "-t", "-f", strat,
-                                 lp, parent], capture_output=True, text=True)
+                                 local_arg(lp), parent], capture_output=True, text=True)
             state = "ok" if r2.returncode == 0 else f"FAILED rc={r2.returncode}"
             print(f"  {strat:7} {rel}  {state}")
         print("\nre-checking...")
@@ -308,7 +318,7 @@ def main(argv):
         cmd_args = [CLI, "filesystem", "upload", "-d", "merge", "-f", "skip"]
         if not want_thumbs:
             cmd_args.append("-t")
-        r = subprocess.run([*cmd_args, *srcs, dest])
+        r = subprocess.run([*cmd_args, *[local_arg(x) for x in srcs], dest])
         if no_verify:
             return r.returncode
 
@@ -342,7 +352,7 @@ def main(argv):
         else:
             paths, dest = rest, "."
         run("filesystem", "download", "-f", "skip",
-            *[abs_remote(p) for p in paths], dest)
+            *[abs_remote(p) for p in paths], local_arg(dest))
 
     elif cmd in ("mv", "cp"):
         need(2, "one or more sources and a destination folder")
@@ -475,8 +485,8 @@ def main(argv):
                 # No local copy: fetch it, so we never delete something we
                 # cannot put back.
                 tmp = tempfile.mkdtemp()
-                run("filesystem", "download", "-f", "replace", f["path"], tmp,
-                    capture=True)
+                run("filesystem", "download", "-f", "replace", f["path"],
+                    local_arg(tmp), capture=True)
                 cand = os.path.join(tmp, on_disk(f["name"]))
                 src = cand if os.path.exists(cand) else None
             # Refuse to touch anything we cannot reproduce byte-for-byte.
@@ -491,7 +501,7 @@ def main(argv):
                            capture_output=True, text=True)
             up = subprocess.run([CLI, "filesystem", "upload", "-t",
                                  "-d", "merge", "-f", "replace",
-                                 src, f["parent"]],
+                                 local_arg(src), f["parent"]],
                                 capture_output=True, text=True)
             if up.returncode == 0:
                 print(f"  [{n}/{len(found)}] ok   {f['rel']}")
