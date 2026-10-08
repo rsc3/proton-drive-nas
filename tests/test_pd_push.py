@@ -191,7 +191,8 @@ def run(r):
     # ---- T12 names the CLI would glob-expand: [ ] { } * ? \ ------------------
     glob_files = ["Nirvana - Nevermind {Deluxe} [FLAC]/01 Smells [Remaster].flac",
                   "Nirvana - Nevermind {Deluxe} [FLAC]/02 plain.flac",
-                  "odd/star*q?.flac", "odd/back\\slash [x].flac"]
+                  "odd/star*q?.flac", "odd/back\\slash [x].flac",
+                  "[2010] Dissent/.comments/01. Day.flac.xml"]   # glob path + hidden folder
     for g in glob_files:
         write(g, os.urandom(30_000))
     rc, out, done = push()

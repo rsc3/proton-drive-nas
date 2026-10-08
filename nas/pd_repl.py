@@ -67,6 +67,16 @@ def local_arg(path):
     return path
 
 
+def needs_cwd(full):
+    """True for a path the CLI can't be given at all: once a path contains
+    * ? [ or { the CLI treats it as a glob, and its globbing never matches a
+    hidden (dot) folder or file, escaped or not. Such a path is handled by a
+    one-off CLI started inside that folder and given just the name (upload)
+    or "." (download destination), which contain nothing glob-like."""
+    parts = [p for p in full.split("/") if p]
+    return bool(re.search(r"[*?\[{]", full)) and any(p.startswith(".") for p in parts)
+
+
 def esc(name):
     """Proton path syntax: a literal / in a name is backslash-escaped."""
     return name.replace("\\", "\\\\").replace("/", "\\/")

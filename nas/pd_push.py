@@ -27,12 +27,13 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pd_repl import Repl, CliError, RateLimited, esc, local_arg  # noqa: E402
+from pd_repl import Repl, CliError, RateLimited, esc, local_arg, needs_cwd  # noqa: E402
 
 SKIP_DIRS = {"@eaDir", "#recycle", "@tmp", ".AppleDouble"}
 SKIP_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
@@ -303,16 +304,30 @@ class Push:
         total = sum(x[2] for x in pre)
         before = {k: e["uid"] for k, e in self.remote_entries(folder_path).items()}
         said = ""
+        normal = [x for x in pre if not needs_cwd(x[1])]
         try:
-            out, err = self.cli.cmd("filesystem", "upload", "-t", "-f", "skip", "-d", "merge",
-                                    *[local_arg(x[1]) for x in pre], folder_path,
-                                    timeout=max(1800, int(total / 1.5e6) + 900))
-            said = (out + err).strip()
+            if normal:
+                out, err = self.cli.cmd("filesystem", "upload", "-t", "-f", "skip", "-d", "merge",
+                                        *[local_arg(x[1]) for x in normal], folder_path,
+                                        timeout=max(1800, int(total / 1.5e6) + 900))
+                said = (out + err).strip()
         except RateLimited:
             raise
         except CliError as e:
             said = str(e)
             self.log(f"WARN upload command failed ({said[:200]}); checking what landed")
+        for x in pre:
+            if not needs_cwd(x[1]):
+                continue
+            self.cli.close()          # never two CLI processes on one cache
+            try:
+                p = subprocess.run([self.cli.cli, "filesystem", "upload", "-t", "-f", "skip",
+                                    local_arg(os.path.basename(x[1])), folder_path],
+                                   cwd=os.path.dirname(x[1]), capture_output=True, text=True,
+                                   timeout=max(1800, int(x[2] / 1.5e6) + 900))
+                said += " | " + (p.stdout + p.stderr).strip()
+            except subprocess.TimeoutExpired:
+                said += f" | timed out: {x[0]}"
         reported = False
         entries = self.remote_entries(folder_path)
         expected = set(known)

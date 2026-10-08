@@ -343,6 +343,14 @@ trigger character; without one, the path is taken literally.
 `pd_repl.local_arg()` does this for both engines, and `pd` does it for paths
 that exist.
 
+One case escaping can't fix: the CLI's glob never matches a hidden (dot)
+folder or file, even when it's named exactly. So
+`[2010] Album/.comments/01.xml` fails even escaped. Symlinks don't help either,
+because the CLI won't upload one. For that case only, the engines close the
+interactive CLI and run a one-off CLI **inside the folder**, giving it just the
+file name (upload) or `.` (download). Those contain no trigger characters, so
+the CLI doesn't glob at all.
+
 ### The CLI can't download a name containing a backslash
 
 A file named `back\slash.flac` uploads fine, but `filesystem download` writes

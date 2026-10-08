@@ -17,7 +17,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pd_repl import Repl, CliError, RateLimited, esc, local_arg  # noqa: E402
+from pd_repl import Repl, CliError, RateLimited, esc, local_arg, needs_cwd  # noqa: E402
+import subprocess  # noqa: E402
 
 CLI = os.environ.get("PROTON_DRIVE_BIN", "proton-drive")
 
@@ -262,10 +263,19 @@ def run(args, cli, log, tag):
         paths = [m["remote"] for _, m in items]
         said = ""
         try:
-            out, err = cli.cmd("filesystem", "download", "-f", "replace", "-d",
-                               "merge", *paths, local_arg(parent),
-                               timeout=4 * 3600)
-            said = (out + err).strip()
+            if needs_cwd(parent + "/"):
+                # Glob-looking path through a hidden folder: the CLI can't be
+                # given it, so run a one-off CLI inside it with "." instead.
+                cli.close()           # never two CLI processes on one cache
+                p = subprocess.run([cli.cli, "filesystem", "download", "-f", "replace",
+                                    "-d", "merge", *paths, "."], cwd=parent,
+                                   capture_output=True, text=True, timeout=4 * 3600)
+                said = (p.stdout + p.stderr).strip()
+            else:
+                out, err = cli.cmd("filesystem", "download", "-f", "replace", "-d",
+                                   "merge", *paths, local_arg(parent),
+                                   timeout=4 * 3600)
+                said = (out + err).strip()
         except RateLimited:
             raise
         except Exception as e:
