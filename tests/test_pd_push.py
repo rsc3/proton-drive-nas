@@ -247,6 +247,16 @@ def run(r):
     rc, out, done = push()
     check("T9 lost manifest adopts existing files", "uploaded=0" in done and "adopted=" in done and len(remote_tree(r)) == n_before, done)
 
+    # ---- T14 --exclude: left out, and never trashed -------------------------
+    write("skipme/inside.flac", os.urandom(20_000))
+    rc, out, done = push("--exclude", "skipme")
+    check("T14 --exclude leaves a folder out", "skipme/inside.flac" not in remote_tree(r) and rc == 0, done)
+    rc, out, done = push()                      # now include it ...
+    up = "skipme/inside.flac" in remote_tree(r)
+    os.remove(os.path.join(SRC, "skipme/inside.flac"))
+    rc, out, done = push("--exclude", "skipme")  # ... and delete it locally while excluded
+    check("T14 an excluded path is never trashed", up and "skipme/inside.flac" in remote_tree(r), done)
+
     if QUICK:
         print("(QUICK: skipping T10 interrupted upload and T11 growing file)")
         return

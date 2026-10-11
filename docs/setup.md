@@ -269,6 +269,8 @@ limit) resumes from its manifest (`state-push/manifest-<name>.json`).
 **4. Then schedule it,** for example weekly:
 `/bin/sh /volume1/<staging>/pd-staging/nas-task.sh push`.
 
+`--exclude RELPATH` (repeatable) leaves a folder or file under the source out of the backup entirely. It's never uploaded, and never trashed in Proton.
+
 What a run leaves out, to pick up on a later run:
 
 - files modified in the last 24 hours;

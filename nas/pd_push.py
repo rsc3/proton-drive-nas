@@ -176,12 +176,18 @@ class Push:
         def onerror(e):
             walk_errors.append(str(e))
 
+        excl = {nfc(x.strip("/")) for x in self.a.exclude}
         for dp, dns, fns in os.walk(src, onerror=onerror):
-            dns[:] = sorted(d for d in dns if d not in SKIP_DIRS)
+            reldir = os.path.relpath(dp, src)
+            reldir = "" if reldir == "." else reldir
+            dns[:] = sorted(d for d in dns if d not in SKIP_DIRS
+                            and nfc(os.path.join(reldir, d)) not in excl)
             for fn in sorted(fns):
                 full = os.path.join(dp, fn)
                 rel = os.path.relpath(full, src)
                 self.present.add(nfc(rel))
+                if nfc(rel) in excl:
+                    continue
                 if fn in SKIP_FILES or fn.startswith("._"):
                     continue
                 if fn.lower().endswith(PARTIAL_SUFFIXES):
@@ -420,7 +426,9 @@ class Push:
             new.append(key)
         self.save_manifest()
 
-        gone = [k for k in self.manifest if k not in self.present]
+        excl = tuple(nfc(x.strip("/")) for x in a.exclude)
+        gone = [k for k in self.manifest if k not in self.present
+                and not any(k == x or k.startswith(x + "/") for x in excl)]
         nbytes = sum(local[k][1] for k in new)
         self.log(f"plan: {len(new)} new ({nbytes/1e9:.2f} GB), {len(changed)} changed, "
                  f"{len(gone)} deleted locally, {self.stats['unchanged']} unchanged, "
@@ -523,6 +531,8 @@ def main():
                     help="qBittorrent save-path prefix -> local path, e.g. /downloads/music=/src/music/torrents")
     ap.add_argument("--min-age-hours", type=float, default=24)
     ap.add_argument("--batch", type=int, default=25)
+    ap.add_argument("--exclude", action="append", default=[], metavar="RELPATH",
+                    help="folder or file under --src to leave out (never uploaded, never trashed)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--allow-mass-delete", action="store_true")
     ap.add_argument("--log")
