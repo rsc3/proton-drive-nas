@@ -189,6 +189,7 @@ class Push:
                 if nfc(rel) in excl:
                     continue
                 if fn in SKIP_FILES or fn.startswith("._"):
+                    self.skip("system metadata (.DS_Store, ._*, Thumbs.db)", rel)
                     continue
                 if fn.lower().endswith(PARTIAL_SUFFIXES):
                     self.skip("partial-download name", rel)
