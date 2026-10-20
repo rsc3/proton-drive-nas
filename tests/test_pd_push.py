@@ -218,6 +218,26 @@ def run(r):
     check("T13 one undownloadable file fails alone, not its batch",
           len(errs) == 1 and "back_slash" in errs[0], errs[:2])
 
+    # ---- T15 mirrored files carry the original dates ---------------------------
+    # Uploads store the source mtime (write() backdates sources by 3 days); the
+    # CLI downloads with the current time, so the mirror must set it back.
+    def mirror_run():
+        q = subprocess.run([sys.executable, os.path.join(NAS, "pd_sync.py"), "--root", REMOTE,
+                            "--target", mirror, "--hash-cache", os.path.join(W, "mirror-cache.json")],
+                           capture_output=True, text=True, env=env)
+        return ([l for l in q.stdout.splitlines() if "=== done" in l] or [q.stdout[-300:]])[-1]
+    off = [w for g, w in zip(good, want)
+           if abs(os.stat(w).st_mtime_ns - os.stat(os.path.join(SRC, g)).st_mtime_ns) > 2_000_000]
+    check("T15 mirrored files carry their source's modification date", not off, off[:2])
+    first, second = mirror_run(), mirror_run()
+    check("T15 a later sync has no dates left to fix", "dated=0" in second and "downloaded=0" in second, second)
+    os.utime(want[0])                         # as if downloaded before this fix
+    third = mirror_run()
+    check("T15 a wrong date is fixed without downloading again",
+          "dated=1" in third and "downloaded=0" in third
+          and abs(os.stat(want[0]).st_mtime_ns - os.stat(os.path.join(SRC, good[0])).st_mtime_ns) <= 2_000_000,
+          third)
+
     # ---- T6 deletion goes to Proton trash ------------------------------------
     uid = tree["loose file.txt"][0]
     os.remove(os.path.join(SRC, "loose file.txt"))

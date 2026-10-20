@@ -537,6 +537,29 @@ letting them overwrite each other.
 Symptom to watch for: a run that reports a small non-zero `downloaded=` with
 `0.00 GB` transferred, every time, with everything else `unchanged`.
 
+### Modification dates: kept on upload, dropped on download
+
+Uploads keep the date. The CLI sends the local file's modification time, and
+Proton stores it on the revision as `activeRevision.claimedModificationTime`.
+Checked on 2026-10-20: `projects_/talks/AutoActivation.m`, uploaded on 2026-10-11,
+is stored as `2014-11-09T23:38:50.000Z`, exactly its date on the NAS before the
+move.
+
+Downloads drop it. `filesystem download` writes every file with the current time,
+so the mirror and anything fetched by hand looked as if all dates were lost.
+`pd_sync.py` (`apply_date`) and `pd get` now set each file's date from
+`claimedModificationTime` after it lands. The mirror also does this for files that
+were already there, so one run corrects an existing mirror without downloading
+anything; it moves the matching hash-cache entry to the new date, so nothing is
+re-read either.
+
+Don't read the node's own `modificationTime` (outside `activeRevision`). That's
+Proton's server timestamp of the last change, which for an uploaded file is the
+upload time.
+
+Anything that re-uploads from a download has to restore the date first, or the
+new revision stores the download time. `pd prune-thumbs` does.
+
 ## Synology / DSM gotchas
 
 - **DSM 7.3.1+ removed the Docker package.** Container Manager only.

@@ -58,6 +58,70 @@ A leading / is optional. Escape a literal / inside a name as \\/ .
 """
 
 
+# The CLI rewrites unsafe characters when it writes a file to disk (same rule as
+# local_name() in nas/pd_sync.py).
+UNSAFE = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\/]')
+
+
+def on_disk(name):
+    z = UNSAFE.sub("_", name)
+    return {"": "_", ".": "_", "..": "__"}.get(z, z)
+
+
+def claimed_ns(iso):
+    """Proton's stored modification date (activeRevision.claimedModificationTime,
+    e.g. "2014-11-09T23:38:50.000Z") as nanoseconds, or None. Same as in
+    nas/pd_sync.py."""
+    import datetime
+    if not iso or not isinstance(iso, str):
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(iso.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    d = dt - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    return (d.days * 86400 + d.seconds) * 1_000_000_000 + d.microseconds * 1000
+
+
+def set_stored_date(path, iso):
+    """Give a local file the date Proton stored for it. The CLI writes every
+    download with the current time; uploads do keep the date. True if set."""
+    want = claimed_ns(iso)
+    if want is None:
+        return False
+    try:
+        st = os.stat(path)
+        if abs(st.st_mtime_ns - want) >= 1_000_000:
+            os.utime(path, ns=(st.st_atime_ns, want))
+        return True
+    except OSError as e:
+        print(f"  could not set the date on {path}: {e}", file=sys.stderr)
+        return False
+
+
+def stored_dates(rpath, local, out):
+    """Walk the remote node rpath and add {local file path: stored date} for
+    every file under it, where local is where the download put it."""
+    import json
+    info = json.loads(run("filesystem", "info", rpath, "--json", capture=True) or "{}")
+    if info.get("type") != "folder":
+        out[local] = (info.get("activeRevision") or {}).get("claimedModificationTime")
+        return
+    for e in json.loads(run("filesystem", "list", rpath, "--json", capture=True) or "[]"):
+        nm = e.get("name") or {}
+        if not nm.get("ok"):
+            continue
+        name = nm["value"]
+        child_r = f"{rpath}/" + name.replace("\\", "\\\\").replace("/", "\\/")
+        child_l = os.path.join(local, on_disk(name))
+        if e.get("type") == "folder":
+            stored_dates(child_r, child_l, out)
+        else:
+            out[child_l] = (e.get("activeRevision") or {}).get("claimedModificationTime")
+
+
 def abs_remote(p):
     # "/" means the sections root (/my-files, /shared-with-me, ...), which is
     # not a real folder -- you cannot create or upload into it. Treat a bare "/"
@@ -351,8 +415,34 @@ def main(argv):
             paths, dest = rest[:-1], rest[-1]
         else:
             paths, dest = rest, "."
+        # Note which files exist first: "-f skip" leaves those untouched, so
+        # only files this download wrote get Proton's stored date.
+        import json
+        before = set()
+        targets = []
+        for p in paths:
+            rp = abs_remote(p)
+            info = json.loads(run("filesystem", "info", rp, "--json",
+                                  capture=True) or "{}")
+            nm = (info.get("name") or {}).get("value")
+            if not nm:
+                continue
+            lp = os.path.join(dest, on_disk(nm))
+            targets.append((rp, lp))
+            if os.path.isdir(lp):
+                for dp, _, fns in os.walk(lp):
+                    before.update(os.path.join(dp, f) for f in fns)
+            elif os.path.exists(lp):
+                before.add(lp)
         run("filesystem", "download", "-f", "skip",
             *[abs_remote(p) for p in paths], local_arg(dest))
+        dates = {}
+        for rp, lp in targets:
+            stored_dates(rp, lp, dates)
+        dated = sum(set_stored_date(lp, iso) for lp, iso in dates.items()
+                    if lp not in before and os.path.isfile(lp))
+        if dated:
+            print(f"set the original modification date on {dated} file(s)")
 
     elif cmd in ("mv", "cp"):
         need(2, "one or more sources and a destination folder")
@@ -412,12 +502,6 @@ def main(argv):
             if os.path.isdir(guess):
                 local_root = guess
 
-        unsafe = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\/]')
-
-        def on_disk(name):
-            z = unsafe.sub("_", name)
-            return {"": "_", ".": "_", "..": "__"}.get(z, z)
-
         def sha1_file(p):
             h = hashlib.sha1()
             with open(p, "rb") as f:
@@ -454,6 +538,7 @@ def main(argv):
                     "size": c,
                     "sha1": ((r.get("claimedDigests") or {})
                              .get("sha1") or "").lower(),
+                    "mtime": r.get("claimedModificationTime"),
                 })
 
         print(f"scanning {remote} ...")
@@ -497,6 +582,24 @@ def main(argv):
                 if tmp:
                     subprocess.run(["rm", "-rf", tmp])
                 continue
+            # The upload stores the local file's modification time, and a
+            # fresh download or a mirror copy has the wrong one. Give the
+            # upload source the original date; a mirror file is read-only
+            # here, so date a copy of it under the same name instead.
+            want = claimed_ns(f.get("mtime"))
+            if want is not None and abs(os.stat(src).st_mtime_ns - want) >= 1_000_000:
+                if not tmp:
+                    import shutil
+                    tmp = tempfile.mkdtemp()
+                    copy = os.path.join(tmp, os.path.basename(src))
+                    shutil.copyfile(src, copy)
+                    src = copy
+                if not set_stored_date(src, f.get("mtime")):
+                    print(f"  [{n}/{len(found)}] SKIP {f['rel']} "
+                          f"(could not keep its original date)")
+                    skipped += 1
+                    subprocess.run(["rm", "-rf", tmp])
+                    continue
             subprocess.run([CLI, "filesystem", "trash", f["path"]],
                            capture_output=True, text=True)
             up = subprocess.run([CLI, "filesystem", "upload", "-t",

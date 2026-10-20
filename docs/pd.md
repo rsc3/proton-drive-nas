@@ -121,9 +121,14 @@ Verified behaviour when re-adding a directory:
 | Differs (you changed it in the web UI) | **Proton copy overwritten** — the risk |
 | Exists only in Proton | **preserved**, listed as `EXTRA`, exit stays 0 |
 
-Nothing here does two-way reconciliation. It can't reliably: the CLI cannot set
-modification times, so there is no dependable way to tell which side is newer.
-If you edit in the web UI, `pd get` the file before touching the local copy.
+Nothing here does two-way reconciliation. It can't reliably: Proton's stored date
+is whatever the uploading client claimed, so there is no dependable way to tell which
+side is newer. If you edit in the web UI, `pd get` the file before touching the local
+copy.
+
+`pd get` gives every file it writes the modification date stored in Proton (the CLI
+on its own writes the current time). Files it skips because they already exist keep
+their own dates.
 
 ### Rearranging
 

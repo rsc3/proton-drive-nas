@@ -56,9 +56,9 @@ evidence — worth reading before you try to "simplify" any of this.
 ## How the sync decides what to copy
 
 Change detection uses the **sha1 that Proton reports for each file**, compared
-against the local copy. Deliberately *not* modification times: the CLI cannot set
-mtimes, so an mtime-based sync would re-copy everything forever. (This is also why
-`rclone bisync` is unusable against Proton.)
+against the local copy. Deliberately *not* modification times: the CLI writes every
+download with the current time, so an mtime-based sync would re-copy everything
+forever. (This is also why `rclone bisync` is unusable against Proton.)
 
 Consequences:
 
@@ -66,6 +66,9 @@ Consequences:
 - Verification is real: a file is "unchanged" only if its bytes hash correctly.
 - Local hashes are cached by size + modification time, so a file is read again
   only when it has changed on disk.
+- Mirrored files keep their **original modification dates**. Uploads store the
+  file's date in Proton; the mirror sets it back on every file after downloading,
+  and `pd get` does the same. See [findings](docs/findings.md#modification-dates-kept-on-upload-dropped-on-download).
 
 ## Design decisions worth knowing
 

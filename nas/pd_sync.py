@@ -2,12 +2,18 @@
 """Mirror Proton Drive to a local directory using the official proton-drive CLI.
 
 One-way: Proton -> local. Mirrors deletions. Change detection uses the sha1 that
-Proton already reports per file, so it does not depend on modification times
-(the CLI cannot set them, which is why a naive mtime sync would loop forever).
+Proton already reports per file, so it does not depend on modification times.
+
+Dates: uploads carry the local file's modification time, which Proton stores on
+the revision as claimedModificationTime, but the CLI writes every download with
+the current time. So after each run every mirrored file gets its stored date
+back (apply_date), including files that were already here. The local sha1 cache
+is keyed by size + mtime, so it is updated in step and nothing is re-hashed.
 
 Exit codes: 0 ok, 1 errors occurred, 2 rate limited (safe to retry later).
 """
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -121,6 +127,7 @@ def walk(root, cli, log, exclude=()):
                     "shown": child_shown,
                     "size": rev.get("claimedSize", rev.get("storageSize")),
                     "sha1": (rev.get("claimedDigests") or {}).get("sha1"),
+                    "mtime": rev.get("claimedModificationTime"),
                 }
     return files, folders, errors
 
@@ -131,6 +138,51 @@ def sha1_of(path, buf=1 << 20):
         while chunk := f.read(buf):
             h.update(chunk)
     return h.hexdigest()
+
+
+def claimed_ns(iso):
+    """Proton's stored date ("2014-11-09T23:38:50.000Z") as integer nanoseconds
+    since the epoch, or None if it is missing or unreadable."""
+    if not iso or not isinstance(iso, str):
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(iso.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    d = dt - epoch
+    return (d.days * 86400 + d.seconds) * 1_000_000_000 + d.microseconds * 1000
+
+
+def apply_date(local, meta, cache=None, dry_run=False):
+    """Give a local file the modification time Proton stored for it.
+
+    Returns "set" (changed, or would change in a dry run), "same" (already
+    right, or Proton has no date for it) or an error message for a failed
+    utime. A matching hash-cache entry is moved to the new mtime, so the next
+    run still finds it and the file is not read again."""
+    want = claimed_ns(meta.get("mtime"))
+    if want is None:
+        return "same"
+    try:
+        st = os.stat(local)
+    except OSError as e:
+        return f"stat failed: {e}"
+    if abs(st.st_mtime_ns - want) < 1_000_000:      # within 1 ms
+        return "same"
+    if dry_run:
+        return "set"
+    try:
+        os.utime(local, ns=(st.st_atime_ns, want))
+    except OSError as e:
+        return f"utime failed: {e}"
+    if cache is not None:
+        hit = cache.get(local)
+        if hit and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+            cache[local] = [hit[0], want, hit[2]]
+    return "set"
 
 
 def needs_download(local, meta, log, cache=None):
@@ -220,7 +272,18 @@ def run(args, cli, log, tag):
         f"(walk {time.time()-t0:.1f}s, {walk_errors} errors)")
 
     stats = {"downloaded": 0, "unchanged": 0, "deleted": 0, "errors": 0,
-             "bytes": 0}
+             "bytes": 0, "dated": 0, "date_warnings": 0}
+
+    def date(rel, meta):
+        """Apply the stored date. A failure is only a warning: it must never
+        count as an error, because errors skip the delete pass."""
+        r = apply_date(os.path.join(args.target, rel), meta, cache, args.dry_run)
+        if r == "set":
+            stats["dated"] += 1
+        elif r != "same":
+            stats["date_warnings"] += 1
+            if stats["date_warnings"] <= 20:
+                log(f"WARN cannot set date on {rel}: {r}")
 
     # Directories first, so downloads have somewhere to land.
     for rel in sorted(folders):
@@ -245,6 +308,7 @@ def run(args, cli, log, tag):
         local = os.path.join(args.target, rel)
         if not needs_download(local, meta, log, cache):
             stats["unchanged"] += 1
+            date(rel, meta)
             continue
         log(f"GET  {rel} ({(meta['size'] or 0)/1e6:.1f} MB)")
         if args.dry_run:
@@ -334,6 +398,7 @@ def run(args, cli, log, tag):
                     continue
                 stats["downloaded"] += 1
                 stats["bytes"] += meta["size"] or 0
+                date(rel, meta)
 
     # Mirror deletions. Skipped entirely if the walk had errors -- a partial
     # listing would look like mass deletion and wipe good data.
@@ -412,10 +477,12 @@ def run(args, cli, log, tag):
             log(f"WARN cannot write hash cache: {e}")
     if cli.restarts:
         log(f"note: the CLI restarted {cli.restarts} time(s) during this run")
+    if stats["date_warnings"] > 20:
+        log(f"WARN {stats['date_warnings']} files in all could not get their date")
     log(f"=== done{tag} in {time.time()-t0:.1f}s: "
         f"downloaded={stats['downloaded']} ({stats['bytes']/1e9:.2f} GB) "
         f"unchanged={stats['unchanged']} deleted={stats['deleted']} "
-        f"errors={stats['errors'] + walk_errors}")
+        f"dated={stats['dated']} errors={stats['errors'] + walk_errors}")
     return 1 if (stats["errors"] or walk_errors) else 0
 
 
