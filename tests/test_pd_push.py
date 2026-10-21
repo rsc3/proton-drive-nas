@@ -277,6 +277,21 @@ def run(r):
     rc, out, done = push("--exclude", "skipme")  # ... and delete it locally while excluded
     check("T14 an excluded path is never trashed", up and "skipme/inside.flac" in remote_tree(r), done)
 
+    # ---- T16 desktop trash folders: never uploaded; moving in = deleting -----
+    write(".Trash-1000/files/old.flac", os.urandom(20_000))
+    write("sub/.Trashes/mac.flac", os.urandom(20_000))
+    write("binme.flac", os.urandom(20_000))
+    rc, out, done = push()
+    t = remote_tree(r)
+    check("T16 trash folders are not uploaded",
+          rc == 0 and "binme.flac" in t and not any(".Trash" in k for k in t), done)
+    os.makedirs(os.path.join(SRC, ".Trash-1000/files"), exist_ok=True)
+    os.rename(os.path.join(SRC, "binme.flac"), os.path.join(SRC, ".Trash-1000/files/binme.flac"))
+    rc, out, done = push()
+    t = remote_tree(r)
+    check("T16 a file moved into a trash folder is trashed in Proton",
+          rc == 0 and "binme.flac" not in t and not any(".Trash" in k for k in t), done)
+
     if QUICK:
         print("(QUICK: skipping T10 interrupted upload and T11 growing file)")
         return

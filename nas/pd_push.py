@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,6 +37,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pd_repl import Repl, CliError, RateLimited, esc, local_arg, needs_cwd  # noqa: E402
 
 SKIP_DIRS = {"@eaDir", "#recycle", "@tmp", ".AppleDouble"}
+# Trash folders that desktops create inside a share when you delete over
+# NFS/SMB: freedesktop .Trash / .Trash-<uid>, macOS .Trashes, Windows
+# $RECYCLE.BIN. They hold deleted files, so they are never backed up, and a
+# file moved into one counts as deleted: its Proton copy goes to Proton's trash.
+TRASH_DIR_RE = re.compile(r"^(\.Trash(-\d+)?|\.Trashes|\$RECYCLE\.BIN)$", re.IGNORECASE)
+
+
+def skip_dir(name):
+    return name in SKIP_DIRS or bool(TRASH_DIR_RE.match(name))
 SKIP_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 PARTIAL_SUFFIXES = (".!qb", ".part", ".!ut", ".crdownload", ".tmp")
 BIDI = {0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e}
@@ -180,7 +190,11 @@ class Push:
         for dp, dns, fns in os.walk(src, onerror=onerror):
             reldir = os.path.relpath(dp, src)
             reldir = "" if reldir == "." else reldir
-            dns[:] = sorted(d for d in dns if d not in SKIP_DIRS
+            for d in dns:
+                if TRASH_DIR_RE.match(d):
+                    self.skip("desktop trash folder (.Trash-*, .Trashes, $RECYCLE.BIN)",
+                              os.path.join(reldir, d) + "/")
+            dns[:] = sorted(d for d in dns if not skip_dir(d)
                             and nfc(os.path.join(reldir, d)) not in excl)
             for fn in sorted(fns):
                 full = os.path.join(dp, fn)

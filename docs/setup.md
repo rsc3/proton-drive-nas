@@ -279,6 +279,9 @@ What a run leaves out, to pick up on a later run:
 - sparse files (a download any client never finished);
 - partial-download names (`*.!qB`, `*.part`, …);
 - `@eaDir` and `#recycle`;
+- desktop trash folders inside a share (`.Trash`, `.Trash-<uid>`, `.Trashes`,
+  `$RECYCLE.BIN`). A file you delete from a file manager over NFS lands in one,
+  so the backup treats it as deleted and its Proton copy goes to Proton's trash;
 - any file that changes while it uploads.
 
 Deletions on the NAS move the Proton copy to Proton's trash. The deletion pass
